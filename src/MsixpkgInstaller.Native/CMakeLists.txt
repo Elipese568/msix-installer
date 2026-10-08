@@ -21,6 +21,7 @@ set(MSIXPKG_CORE_SOURCES
   src/container.cpp
   src/appx.cpp
   src/verify.cpp
+  src/certstore.cpp
 )
 
 add_library(msixpkg_core STATIC ${MSIXPKG_CORE_SOURCES})
@@ -41,11 +42,16 @@ endif()
 add_executable(msixpkg_native_tests
   tests/main.cpp
   tests/vectors_tests.cpp
+  tests/certstore_tests.cpp
 )
 target_link_libraries(msixpkg_native_tests PRIVATE msixpkg_core)
 # 白盒测试：允许直接包含内部头（json/inflate/zip 都是两端共享的格式契约，值得单独覆盖）。
 target_include_directories(msixpkg_native_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_options(msixpkg_native_tests PRIVATE /utf-8 /W4 /permissive- /EHsc /Zc:__cplusplus)
+if(MSIXPKG_WARNINGS_AS_ERRORS)
+  # 测试代码同样按 /WX 要求：「Release 零警告」不能只在被测库上成立。
+  target_compile_options(msixpkg_native_tests PRIVATE /WX)
+endif()
 target_compile_definitions(msixpkg_native_tests PRIVATE
   MSIXPKG_VECTORS_DIR="${MSIXPKG_REPO_ROOT}/tests/vectors"
   MSIXPKG_REPO_ROOT="${MSIXPKG_REPO_ROOT}"

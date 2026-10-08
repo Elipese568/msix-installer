@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "msixpkg/errors.h"
+
 namespace testing {
 
 using TestFunction = void (*)();
@@ -53,6 +55,10 @@ inline int run_all() {
 
         try {
             test.function();
+        } catch (const ::msixpkg::Error& error) {
+            // 带上 code 与 detail：否则「Win32 error 5」这类关键线索会被 what() 丢掉。
+            report_failure("<uncaught>", 0,
+                std::string("unexpected msixpkg::Error in ") + current + ": " + error.to_string());
         } catch (const std::exception& ex) {
             report_failure("<uncaught>", 0, std::string("unexpected exception in ") + current + ": " + ex.what());
         } catch (...) {
