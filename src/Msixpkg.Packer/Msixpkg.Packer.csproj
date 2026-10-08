@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>msixpkg</AssemblyName>
+    <RootNamespace>Msixpkg.Packer</RootNamespace>
+    <Description>.msixpkg packer and verifier CLI.</Description>
+    <IsPackable>true</IsPackable>
+    <PackAsTool>false</PackAsTool>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Msixpkg.Core\Msixpkg.Core.csproj" />
+  </ItemGroup>
+
+</Project>

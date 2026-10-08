@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      netstandard2.0 是硬约束：这个程序集要被 Visual Studio 的 .NET Framework MSBuild 进程内加载。
+      因此不能引用任何需要绑定重定向的第三方包，Microsoft.Build.* 也必须 ExcludeAssets=runtime
+      （它们由宿主 MSBuild 提供，绝不能随任务 DLL 一起发布）。
+    -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>Msixpkg.Tasks</AssemblyName>
+    <RootNamespace>Msixpkg.Build</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <!--
+      关键：应用工程会用 -p:Platform=x64 构建，这个全局属性会被传播到本工程，
+      于是输出路径变成 bin\x64\Release\——而 Msixpkg.Build.targets 按 bin\$(Configuration)\ 加载任务。
+      本工程与平台无关（netstandard2.0），因此固定不把平台名插入输出路径。
+    -->
+    <AppendPlatformToOutputPath>false</AppendPlatformToOutputPath>
+    <!-- 任务 DLL 需要与 Msixpkg.Core.dll 同目录，MSBuild 才能解析引用。 -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.11.4" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.11.4" PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Msixpkg.Core\Msixpkg.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Msixpkg.Build.targets" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

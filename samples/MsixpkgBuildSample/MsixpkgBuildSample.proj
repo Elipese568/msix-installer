@@ -1,0 +1,61 @@
+<Project DefaultTargets="Build">
+
+  <!--
+    MSBuild 接入样例：证明「构建期自动产出 .msixpkg」这条链路真的能跑通，
+    并且刻意用真实的 MSBuild 宿主（VS 的 .NET Framework MSBuild 与 dotnet 的 .NET MSBuild 都要过），
+    因为 Msixpkg.Tasks 是 netstandard2.0 且被进程内加载 —— 这条路径最容易在换宿主时崩掉。
+
+    注意：这里不假装自己是 WinUI3 工程。真实的 Packaged WinUI3 单项目 MSIX 用同一个
+    Msixpkg.Build.targets，区别只有两点：
+      1) 它自己会在 GenerateAppxPackage 里产出 .msix（本样例改为复用已签名的测试夹具）；
+      2) 因此不需要设置 MsixpkgInputMsix，默认的候选解析（@(AppxPackageFile) / AppxPackageDir 搜索）会命中。
+    真实工程的接入步骤见 docs/integration-winui3.md。
+  -->
+
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <RepoRoot>$(MSBuildThisFileDirectory)..\..\</RepoRoot>
+
+    <SampleInputMsix>$(RepoRoot)tests\vectors\sample-main.msix</SampleInputMsix>
+    <SampleDependencyMsix>$(RepoRoot)tests\vectors\sample-dependency.msix</SampleDependencyMsix>
+    <TestPfx>$(RepoRoot)tests\vectors\test-only.pfx</TestPfx>
+    <TestPfxPassword>msixpkg-test-only</TestPfxPassword>
+
+    <SampleOutputDir>$(MSBuildThisFileDirectory)artifacts\</SampleOutputDir>
+    <SampleInputDir>$(SampleOutputDir)input\</SampleInputDir>
+    <SampleDependencyDir>$(SampleOutputDir)dependencies\</SampleDependencyDir>
+
+    <!-- ==== Msixpkg.Build 配置（真实工程里通常写在 .csproj 的 PropertyGroup 里）==== -->
+    <MsixpkgEnabled>true</MsixpkgEnabled>
+    <MsixpkgInputMsix>$(SampleInputDir)sample-main.msix</MsixpkgInputMsix>
+    <PackageCertificateKeyFile>$(TestPfx)</PackageCertificateKeyFile>
+    <MsixpkgCertificatePassword>$(TestPfxPassword)</MsixpkgCertificatePassword>
+    <MsixpkgDependencyDir>$(SampleDependencyDir)</MsixpkgDependencyDir>
+    <MsixpkgOutputDir>$(SampleOutputDir)</MsixpkgOutputDir>
+    <MsixpkgInstallerMinVersion>0.1.0</MsixpkgInstallerMinVersion>
+    <MsixpkgDisplayName>Msixpkg Sample App</MsixpkgDisplayName>
+    <MsixpkgDisplayDescription>Produced by the Msixpkg.Build MSBuild integration sample.</MsixpkgDisplayDescription>
+  </PropertyGroup>
+
+  <Import Project="$(RepoRoot)src\Msixpkg.Build\Msixpkg.Build.targets" />
+
+  <Target Name="PrepareSampleInputs">
+    <MakeDir Directories="$(SampleInputDir);$(SampleDependencyDir)" />
+    <Copy SourceFiles="$(SampleInputMsix)" DestinationFolder="$(SampleInputDir)" />
+    <Copy SourceFiles="$(SampleDependencyMsix)" DestinationFolder="$(SampleDependencyDir)" />
+  </Target>
+
+  <!-- 先确保任务程序集存在：UsingTask 是在任务首次被使用时才解析 AssemblyFile 的，所以这里来得及。 -->
+  <Target Name="EnsureMsixpkgTasks">
+    <MSBuild Projects="$(RepoRoot)src\Msixpkg.Build\Msixpkg.Build.csproj"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)" />
+  </Target>
+
+  <Target Name="Build" DependsOnTargets="EnsureMsixpkgTasks;PrepareSampleInputs" />
+
+  <Target Name="Clean">
+    <RemoveDir Directories="$(SampleOutputDir)" />
+  </Target>
+
+</Project>

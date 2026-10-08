@@ -1,0 +1,97 @@
+<Project>
+
+  <!--
+    Msixpkg.Build.targets —— 把已签名的 .msix 自动打包成 .msixpkg。
+
+    接入方式（应用工程 .csproj）：
+      Import 本文件（仓库内相对路径，或打包成 NuGet 后用 PackageReference）；
+      然后在 PropertyGroup 里设置：
+        MsixpkgEnabled            = true      （默认 false，必须显式打开）
+        PackageCertificateKeyFile = certs\App.Dev.pfx
+        MsixpkgCertificatePassword= 由环境变量注入，绝不入库
+        MsixpkgDependencyDir      = $(AppxPackageDir)Dependencies\
+
+    挂载点说明：
+      - 单项目 MSIX（Windows App SDK）在 GenerateAppxPackage 里产出 .msix；
+      - 直接跑 Build 也可以（VS 的 F5/发布路径会自行调用 GenerateAppxPackage）；
+      - MSBuild 中同一目标在一次构建里只会执行一次，所以同时写两个挂载点不会重复打包。
+  -->
+
+  <PropertyGroup>
+    <MsixpkgEnabled Condition="'$(MsixpkgEnabled)' == ''">false</MsixpkgEnabled>
+    <MsixpkgTasksAssembly Condition="'$(MsixpkgTasksAssembly)' == ''">$(MSBuildThisFileDirectory)bin\$(Configuration)\netstandard2.0\Msixpkg.Tasks.dll</MsixpkgTasksAssembly>
+    <!--
+      兜底：宿主把 $(Platform) 插进输出路径时（AppendPlatformToOutputPath 被打开）也找得到任务程序集。
+      注意这个 Exists 判断发生在属性求值阶段，即 MSBuild 尚未构建任何东西时；
+      因此它只能适配「已经被构建过」的布局，不能替代 Msixpkg.Build.csproj 里
+      AppendPlatformToOutputPath=false 那个修正。
+    -->
+    <MsixpkgTasksAssembly Condition="!Exists('$(MsixpkgTasksAssembly)') and Exists('$(MSBuildThisFileDirectory)bin\$(Platform)\$(Configuration)\netstandard2.0\Msixpkg.Tasks.dll')">$(MSBuildThisFileDirectory)bin\$(Platform)\$(Configuration)\netstandard2.0\Msixpkg.Tasks.dll</MsixpkgTasksAssembly>
+    <!-- NuGet 包布局 -->
+    <MsixpkgTasksAssembly Condition="!Exists('$(MsixpkgTasksAssembly)') and Exists('$(MSBuildThisFileDirectory)..\tasks\netstandard2.0\Msixpkg.Tasks.dll')">$(MSBuildThisFileDirectory)..\tasks\netstandard2.0\Msixpkg.Tasks.dll</MsixpkgTasksAssembly>
+    <MsixpkgInstallerMinVersion Condition="'$(MsixpkgInstallerMinVersion)' == ''">0.1.0</MsixpkgInstallerMinVersion>
+    <MsixpkgMinOsBuild Condition="'$(MsixpkgMinOsBuild)' == ''">19041</MsixpkgMinOsBuild>
+    <MsixpkgSign Condition="'$(MsixpkgSign)' == ''">true</MsixpkgSign>
+    <!-- 复用应用工程已经为 AppxPackageSigningEnabled 配好的同一个密码，避免两处各写一份。 -->
+    <MsixpkgCertificatePassword Condition="'$(MsixpkgCertificatePassword)' == ''">$(PackageCertificatePassword)</MsixpkgCertificatePassword>
+    <MsixpkgCertificatePfx Condition="'$(MsixpkgCertificatePfx)' == ''">$(PackageCertificateKeyFile)</MsixpkgCertificatePfx>
+    <MsixpkgIncludeCertificate Condition="'$(MsixpkgIncludeCertificate)' == ''">true</MsixpkgIncludeCertificate>
+    <MsixpkgAllowAllUsers Condition="'$(MsixpkgAllowAllUsers)' == ''">true</MsixpkgAllowAllUsers>
+  </PropertyGroup>
+
+  <UsingTask TaskName="Msixpkg.Build.PackTask" AssemblyFile="$(MsixpkgTasksAssembly)" />
+
+  <Target Name="MsixpkgResolveInput" Condition="'$(MsixpkgEnabled)' == 'true'">
+    <ItemGroup>
+      <!--
+        候选来源顺序（任务里取真实存在且最新的那个 .msix）：
+          1) 显式指定 MsixpkgInputMsix
+          2) @(FinalAppxPackageItem)          —— SDK.BuildTools.MSIX 在 _GenerateAppxPackageFile 里填的输出项
+          3) @(AllBuiltSideloadPackages)      —— 同一目标填的 sideload 产物集合
+          4) $(AppxPackageOutput)             —— 由 _ComputeAppxPackageOutput 计算的最终路径（属性，非项）
+          5) $(AppxPackageDir)**\*.msix       —— 兜底搜索
+
+        注意不要用 @(AppxPackageFile)：那是打包用的「文件映射表」路径（package.map.txt），不是产物列表。
+        以上名称实证于 Microsoft.Windows.SDK.BuildTools.MSIX 1.7.251221100 的
+        Microsoft.Windows.SDK.BuildTools.MSIX.Packaging.targets（VS 2026 + Win11 26300）。
+      -->
+      <_MsixpkgInputCandidate Include="$(MsixpkgInputMsix)" Condition="'$(MsixpkgInputMsix)' != ''" />
+      <_MsixpkgInputCandidate Include="@(FinalAppxPackageItem)" />
+      <_MsixpkgInputCandidate Include="@(AllBuiltSideloadPackages)" />
+      <_MsixpkgInputCandidate Include="$(AppxPackageOutput)" Condition="'$(AppxPackageOutput)' != ''" />
+      <_MsixpkgInputCandidate Include="$(AppxPackageDir)**\*.msix" Condition="'@(_MsixpkgInputCandidate)' == ''" />
+    </ItemGroup>
+
+    <PropertyGroup>
+      <MsixpkgOutputDir Condition="'$(MsixpkgOutputDir)' == ''">$(AppxPackageDir)</MsixpkgOutputDir>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="MsixpkgPack"
+          AfterTargets="_GenerateAppxPackage;Build"
+          DependsOnTargets="MsixpkgResolveInput"
+          Condition="'$(MsixpkgEnabled)' == 'true'">
+
+    <!-- 找不到输入时故意把空集合传给任务，由任务给出可操作的错误，而不是静默跳过打包。 -->
+    <PackTask InputMsix="@(_MsixpkgInputCandidate)"
+              CertificatePfx="$(MsixpkgCertificatePfx)"
+              CertificatePassword="$(MsixpkgCertificatePassword)"
+              DependencyDirectory="$(MsixpkgDependencyDir)"
+              OutputDirectory="$(MsixpkgOutputDir)"
+              OutputFileName="$(MsixpkgOutputFileName)"
+              MinOsBuild="$(MsixpkgMinOsBuild)"
+              InstallerMinVersion="$(MsixpkgInstallerMinVersion)"
+              Sign="$(MsixpkgSign)"
+              IncludeCertificate="$(MsixpkgIncludeCertificate)"
+              AllowAllUsers="$(MsixpkgAllowAllUsers)"
+              DisplayName="$(MsixpkgDisplayName)"
+              DisplayDescription="$(MsixpkgDisplayDescription)"
+              DisplayHomepage="$(MsixpkgDisplayHomepage)">
+      <Output TaskParameter="OutputFile" ItemName="MsixpkgOutputFile" />
+      <Output TaskParameter="CertificateFile" ItemName="MsixpkgCertificateFile" />
+      <Output TaskParameter="PublisherThumbprint" ItemName="MsixpkgPublisherThumbprint" />
+      <Output TaskParameter="PackageIdentity" ItemName="MsixpkgPackageIdentity" />
+    </PackTask>
+  </Target>
+
+</Project>
