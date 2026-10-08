@@ -1,0 +1,9 @@
+# 仓库根 .gitignore 会排除 *.pfx / *.msix（这对真实产物是对的），但这三个文件是黄金样本的
+# 必需输入：C# 打包器与 C++ 原生安装器共享它们做一致性回归。因此在这里显式反排除。
+#
+# test-only.pfx 是测试专用自签名证书（密码 msixpkg-test-only），已在 README.md 中明确禁止
+# 用于任何真实分发；它不含任何真实身份的私钥。
+!test-only.pfx
+!sample-main.msix
+!sample-dependency.msix
+!*.msixpkg

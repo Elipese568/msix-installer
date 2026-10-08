@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Msixpkg.Build/Msixpkg.Build.csproj" />
+    <Project Path="src/Msixpkg.Core/Msixpkg.Core.csproj" />
+    <Project Path="src/Msixpkg.Packer/Msixpkg.Packer.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Msixpkg.Core.Tests/Msixpkg.Core.Tests.csproj" />
+  </Folder>
+</Solution>

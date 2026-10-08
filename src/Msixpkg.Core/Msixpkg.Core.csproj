@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      netstandard2.0：给 MSBuild 的 .NET Framework 宿主进程内加载（打包任务）。
+      net9.0：给 CLI 与测试用，以便使用 X509CertificateLoader 等新 API。
+      刻意保持零第三方依赖 —— MSBuild 进程内加载对绑定重定向极其敏感。
+    -->
+    <TargetFrameworks>netstandard2.0;net9.0</TargetFrameworks>
+    <AssemblyName>Msixpkg.Core</AssemblyName>
+    <RootNamespace>Msixpkg.Core</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>Msixpkg.Core</PackageId>
+    <Description>.msixpkg container format: read, write, sign and validate.</Description>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0'">
+    <!--
+      SYSLIB0057 提示改用 X509CertificateLoader。我们确实在能用的地方用了它（见 Packing/MsixpkgCertificates.cs），
+      但两处场景没有等价替代：
+        1) netstandard2.0 目标上 X509CertificateLoader 根本不存在（同一个源文件要两端都能编译）；
+        2) 从 AppxSignature.p7x 这类 PKCS#7 证书袋里取证书，X509Certificate2Collection.Import 仍是唯一入口。
+      因此按目标框架抑制该警告，而不是在每个调用点写 #if。
+    -->
+    <NoWarn>$(NoWarn);SYSLIB0057</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 让测试直接覆盖内部的最小 JSON 读写器（它是格式契约的一部分）。 -->
+    <InternalsVisibleTo Include="Msixpkg.Core.Tests" />
+  </ItemGroup>
+
+</Project>

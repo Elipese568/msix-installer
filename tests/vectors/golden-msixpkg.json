@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "createdUtc": "2026-01-01T00:00:00Z",
+  "identity": {
+    "name": "Msixpkg.Sample",
+    "publisher": "CN=Msixpkg Test Publisher, O=MsixpkgInstaller, C=CN",
+    "version": "1.0.0.0",
+    "architecture": "x64"
+  },
+  "mainPackage": {
+    "path": "payload/x64/main/Msixpkg.Sample_1.0.0.0_x64.msix",
+    "sha256": "b2d4492c951eafe938b34a39ac2ea3365d7e4f4db1f917e3c7113f18a5fa23a9",
+    "size": 2061
+  },
+  "dependencies": [
+    {
+      "path": "payload/x64/deps/Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.msix",
+      "sha256": "3ecfc4fd398ee9b935bd9938d85ad23c5bbb8eeb65fb5f5e11639885ddb42a5d",
+      "size": 1991,
+      "name": "Microsoft.VCLibs.140.00.UWPDesktop",
+      "version": "14.0.33728.0"
+    }
+  ],
+  "publisher": {
+    "certPath": "publisher/publisher.cer",
+    "subject": "CN=Msixpkg Test Publisher, O=MsixpkgInstaller, C=CN",
+    "thumbprintSha1": "700ecc4aa2eabe6f4d4f2f715d87edefb5b948b0",
+    "thumbprintSha256": "9cd702035dd941aa6fe12870550ffc61633281da08839cfb0dfb3a95e1b913b9",
+    "notBeforeUtc": "2026-10-07T11:54:39Z",
+    "notAfterUtc": "2036-10-04T11:54:39Z",
+    "selfSigned": true
+  },
+  "minOsBuild": 19041,
+  "installerMinVersion": "0.1.0",
+  "requiresAdmin": true,
+  "allowAllUsers": true,
+  "uninstallRemoveCertificate": true,
+  "display": {
+    "name": "Msixpkg Sample",
+    "description": "Golden vector for the msixpkg v1 format.",
+    "homepage": "https://example.invalid/msixpkg"
+  }
+}

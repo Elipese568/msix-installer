@@ -1,0 +1,21 @@
+# 二进制夹具（黄金样本、测试证书、合成 .msix）绝不能被行尾转换或文本 diff 触碰。
+*.msixpkg binary
+*.msix binary
+*.cer binary
+*.p7x binary
+*.p7b binary
+*.pfx binary
+
+*.png binary
+*.ico binary
+
+# 仓库以 UTF-8 为准
+*.cs text eol=crlf
+*.csproj text eol=crlf
+*.props text eol=crlf
+*.targets text eol=crlf
+*.md text eol=lf
+*.ps1 text eol=crlf
+*.rc text eol=crlf
+*.h text eol=crlf
+*.cpp text eol=crlf
