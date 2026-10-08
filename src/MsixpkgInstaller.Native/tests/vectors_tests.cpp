@@ -542,3 +542,72 @@ MSIXPKG_TEST(validate_rejects_a_container_with_a_foreign_identity) {
     CHECK_EQ(manifest.identity.publisher.substr(0, 2), std::string("XX"));
 }
 
+// ---------- T7：单个缺陷的负例向量 ----------
+//
+// 这三个容器由 C# 侧的 VectorGenerator 生成（MSIXPKG_GENERATE_VECTORS=1），
+// 每个只带**一个**缺陷，且内层 .msix 与容器证书配套 —— 这样「被拒」的原因唯一，
+// 断言不会因为内层 Appx 的发布者/签名者指纹对不上而变得无法定位。
+
+namespace {
+
+/// 负例向量都不做钉扎（要验的是证书本身），但主机门禁照常给。
+msixpkg::ValidateOptions negative_vector_options() {
+    msixpkg::ValidateOptions options;
+    options.installer_version = "0.2.0";
+    options.host_build = 26300;
+    options.host_architecture = "x64";
+    options.require_signature = true;
+    options.validate_inner_appx = true;
+    return options;
+}
+
+bool has_code_with_prefix(const msixpkg::Report& report, const char* prefix) {
+    for (const msixpkg::Issue& issue : report.errors) {
+        if (issue.code.rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+}  // namespace
+
+MSIXPKG_TEST(validate_rejects_the_unsigned_vector_only_for_the_missing_signature) {
+    const msixpkg::Report report =
+        msixpkg::validate(vectors_dir() / "negative-unsigned.msixpkg", negative_vector_options());
+
+    CHECK(!report.valid());
+    CHECK_MSG(has_error(report, msixpkg::codes::SignatureMissing), describe_errors(report));
+    CHECK_EQ(report.publisher_was_pinned, false);
+
+    // 除了缺签名，证书与内层 Appx 都必须是好的 —— 否则这条负例就无法定位。
+    CHECK_MSG(!has_code_with_prefix(report, "E_CERTIFICATE_"), describe_errors(report));
+    CHECK_MSG(!has_code_with_prefix(report, "E_APPX_"), describe_errors(report));
+}
+
+MSIXPKG_TEST(validate_rejects_the_expired_certificate_vector) {
+    const msixpkg::Report report =
+        msixpkg::validate(vectors_dir() / "negative-expired.msixpkg", negative_vector_options());
+
+    CHECK(!report.valid());
+    CHECK_MSG(has_error(report, msixpkg::codes::CertificateExpired), describe_errors(report));
+    CHECK_MSG(!has_error(report, msixpkg::codes::CertificateNotYetValid), describe_errors(report));
+    CHECK_MSG(!has_error(report, msixpkg::codes::SignatureInvalid), describe_errors(report));
+    CHECK_MSG(!has_code_with_prefix(report, "E_APPX_"), describe_errors(report));
+
+    // 证书本身解析得出来（过期不等于解析失败）。
+    CHECK(report.has_publisher_certificate);
+}
+
+MSIXPKG_TEST(validate_rejects_the_wrong_eku_certificate_vector) {
+    const msixpkg::Report report =
+        msixpkg::validate(vectors_dir() / "negative-wrong-eku.msixpkg", negative_vector_options());
+
+    CHECK(!report.valid());
+    CHECK_MSG(has_error(report, msixpkg::codes::CertificateNotCodeSigning), describe_errors(report));
+    CHECK_MSG(!has_error(report, msixpkg::codes::CertificateExpired), describe_errors(report));
+    CHECK_MSG(!has_code_with_prefix(report, "E_APPX_"), describe_errors(report));
+    CHECK(report.has_publisher_certificate);
+}
+

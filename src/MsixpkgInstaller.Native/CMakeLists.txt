@@ -122,6 +122,13 @@ endif()
 # 控制台子系统：入口是 wmain（argv 直接拿到宽字符，避免代码页把中文路径拆坏）。
 set_target_properties(msixpkg_native PROPERTIES OUTPUT_NAME "msixpkg-native")
 
+# ---------- GUI 向导 ----------
+# 目标定义放在 gui/gui.cmake 里单独维护（界面代码与核心库分开演进）；
+# 文件不存在时构建照常可用（CI / 无 GUI 的场合）。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gui/gui.cmake")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/gui/gui.cmake")
+endif()
+
 # 用 VS 的调试器跑测试时能直接命中源码
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT msixpkg_native_tests)
 enable_testing()
