@@ -145,6 +145,32 @@ void ensure_apartment() {
     throw Error(failure.code, failure.hint, detail);
 }
 
+/**
+ * **WinRT 异常防火墙。**
+ *
+ * 关键事实（实测踩过）：`winrt::hresult_error` 是**不继承 std::exception** 的普通结构体。
+ * 它一旦逃出部署层，上层 `catch (const std::exception&)` 接不住，进程会直接
+ * `std::terminate()` → `abort()` → 退出码 3，而且 stdout 缓冲没机会 flush，
+ * 用户看到的是「什么都没发生、进程莫名消失」。
+ *
+ * 所以每个对外函数的整个函数体都要包在这里面，把 HRESULT 统一翻译成 msixpkg::Error。
+ * `context` 用来把「哪一步失败」讲清楚 —— 光有 HRESULT 的通用提示会误导用户
+ * （例如把「枚举包仓库被拒」说成「证书步骤需要管理员」）。
+ */
+template <typename Function>
+auto guard_winrt(const char* context, Function&& function) -> decltype(function()) {
+    try {
+        return function();
+    } catch (const winrt::hresult_error& error) {
+        const uint32_t hresult = static_cast<uint32_t>(error.code().value);
+        const DeploymentFailure failure = describe_deployment_failure(hresult);
+        std::string detail = failure.name.empty() ? std::string("HRESULT") : failure.name;
+        detail += " " + hresult_hex(hresult) + " - " + winrt::to_string(error.message());
+
+        throw Error(failure.code, std::string(context) + ": " + failure.hint, detail);
+    }
+}
+
 /// 安装一个包；失败抛 Error。percent_base/percent_span 把部署栈的 0..100 映射到整体进度。
 void add_one_package(
     WinRtPackageManager& manager,
@@ -471,53 +497,58 @@ DeploymentFailure describe_deployment_failure(uint32_t hresult) {
 // ---------- 系统访问层 ----------
 
 std::vector<RegisteredPackage> find_registered_packages(std::string_view family_name) {
-    ensure_apartment();
-    WinRtPackageManager manager;
+    return guard_winrt("The installed packages could not be enumerated", [&]() -> std::vector<RegisteredPackage> {
+        ensure_apartment();
+        WinRtPackageManager manager;
 
-    auto found = family_name.empty()
-        ? manager.FindPackagesForUser(winrt::hstring{})
-        : manager.FindPackagesForUser(winrt::hstring{}, winrt::to_hstring(family_name));
+        auto found = family_name.empty()
+            ? manager.FindPackagesForUser(winrt::hstring{})
+            : manager.FindPackagesForUser(winrt::hstring{}, winrt::to_hstring(family_name));
 
-    std::vector<RegisteredPackage> packages;
-    for (const WinRtPackage& package : found) {
-        try {
-            RegisteredPackage entry;
-            const auto id = package.Id();
-            entry.name = winrt::to_string(id.Name());
-            entry.full_name = winrt::to_string(id.FullName());
-            entry.family_name = winrt::to_string(id.FamilyName());
-            entry.version = format_version(id.Version());
-            entry.architecture = architecture_name(id.Architecture());
-            entry.publisher = winrt::to_string(id.Publisher());
-            entry.publisher_id = winrt::to_string(id.PublisherId());
-            entry.is_framework = package.IsFramework();
-            entry.development_mode = package.IsDevelopmentMode();
-            entry.status = status_name(package.Status());
+        std::vector<RegisteredPackage> packages;
+        for (const WinRtPackage& package : found) {
             try {
-                entry.installed_path = winrt::to_string(package.InstalledPath());
+                RegisteredPackage entry;
+                const auto id = package.Id();
+                entry.name = winrt::to_string(id.Name());
+                entry.full_name = winrt::to_string(id.FullName());
+                entry.family_name = winrt::to_string(id.FamilyName());
+                entry.version = format_version(id.Version());
+                entry.architecture = architecture_name(id.Architecture());
+                entry.publisher = winrt::to_string(id.Publisher());
+                entry.publisher_id = winrt::to_string(id.PublisherId());
+                entry.is_framework = package.IsFramework();
+                entry.development_mode = package.IsDevelopmentMode();
+                entry.status = status_name(package.Status());
+                try {
+                    entry.installed_path = winrt::to_string(package.InstalledPath());
+                } catch (const winrt::hresult_error&) {
+                    // IPackage8 在旧系统上不存在；安装路径只是展示信息，缺了不影响判定。
+                }
+
+                packages.push_back(std::move(entry));
             } catch (const winrt::hresult_error&) {
-                // IPackage8 在旧系统上不存在；安装路径只是展示信息，缺了不影响判定。
+                // 仓库里可能残留读不出属性的坏包；跳过它，不让 list / verify / repair 整体失败。
             }
-
-            packages.push_back(std::move(entry));
-        } catch (const winrt::hresult_error&) {
-            // 仓库里可能残留读不出属性的坏包；跳过它，不让 list / verify / repair 整体失败。
         }
-    }
 
-    return packages;
+        return packages;
+    });
 }
 
 bool is_package_registered(std::string_view family_name) {
-    ensure_apartment();
-    WinRtPackageManager manager;
-    WinRtPackage package{nullptr};
-    return first_package(
-        manager.FindPackagesForUser(winrt::hstring{}, winrt::to_hstring(family_name)), package);
+    return guard_winrt("The installed packages could not be enumerated", [&] {
+        ensure_apartment();
+        WinRtPackageManager manager;
+        WinRtPackage package{nullptr};
+        return first_package(
+            manager.FindPackagesForUser(winrt::hstring{}, winrt::to_hstring(family_name)), package);
+    });
 }
 
 InstallResult install_packages(const InstallRequest& request, const DeploymentProgress& progress) {
-    if (request.main_package.empty()) {
+    return guard_winrt("The package could not be installed", [&]() -> InstallResult {
+        if (request.main_package.empty()) {
         throw Error(codes::IoError, "No main package was supplied for installation.");
     }
 
@@ -581,12 +612,14 @@ InstallResult install_packages(const InstallRequest& request, const DeploymentPr
         result.provisioned = true;
     }
 
-    report(progress, 100, L"Installed");
-    return result;
+        report(progress, 100, L"Installed");
+        return result;
+    });
 }
 
 UninstallResult uninstall_package(const UninstallRequest& request, const DeploymentProgress& progress) {
-    ensure_apartment();
+    return guard_winrt("The package could not be removed", [&]() -> UninstallResult {
+        ensure_apartment();
     WinRtPackageManager manager;
 
     UninstallResult result;
@@ -636,35 +669,40 @@ UninstallResult uninstall_package(const UninstallRequest& request, const Deploym
             static_cast<uint32_t>(error.code().value), winrt::to_string(error.message()));
     }
 
-    result.removed = true;
-    report(progress, 100, L"Removed");
-    return result;
+        result.removed = true;
+        report(progress, 100, L"Removed");
+        return result;
+    });
 }
 
 void provision_package_for_all_users(std::string_view family_name, const DeploymentProgress& progress) {
-    if (family_name.empty()) {
-        throw Error(deployment_codes::AllUsersNotPermitted, "A package family name is required for provisioning.");
-    }
+    return guard_winrt("The package could not be provisioned for all users", [&] {
+        if (family_name.empty()) {
+            throw Error(deployment_codes::AllUsersNotPermitted, "A package family name is required for provisioning.");
+        }
 
-    ensure_apartment();
-    WinRtPackageManager manager;
-    report(progress, 90, L"Provisioning for all users");
-    const WinRtDeploymentResult result = manager.ProvisionPackageForAllUsersAsync(
-        winrt::to_hstring(family_name)).get();
-    const int32_t extended = result.ExtendedErrorCode().value;
-    if (extended != 0) {
-        throw_deployment_failure(static_cast<uint32_t>(extended), winrt::to_string(result.ErrorText()));
-    }
+        ensure_apartment();
+        WinRtPackageManager manager;
+        report(progress, 90, L"Provisioning for all users");
+        const WinRtDeploymentResult result = manager.ProvisionPackageForAllUsersAsync(
+            winrt::to_hstring(family_name)).get();
+        const int32_t extended = result.ExtendedErrorCode().value;
+        if (extended != 0) {
+            throw_deployment_failure(static_cast<uint32_t>(extended), winrt::to_string(result.ErrorText()));
+        }
+    });
 }
 
 void deprovision_package_for_all_users(std::string_view family_name) {
-    if (family_name.empty()) {
-        throw Error(deployment_codes::AllUsersNotPermitted, "A package family name is required for deprovisioning.");
-    }
+    return guard_winrt("The package could not be deprovisioned", [&] {
+        if (family_name.empty()) {
+            throw Error(deployment_codes::AllUsersNotPermitted, "A package family name is required for deprovisioning.");
+        }
 
-    ensure_apartment();
-    WinRtPackageManager manager;
-    manager.DeprovisionPackageForAllUsersAsync(winrt::to_hstring(family_name)).get();
+        ensure_apartment();
+        WinRtPackageManager manager;
+        manager.DeprovisionPackageForAllUsersAsync(winrt::to_hstring(family_name)).get();
+    });
 }
 
 void activate_application(std::string_view aumid) {

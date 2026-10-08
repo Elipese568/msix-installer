@@ -64,6 +64,11 @@ set(MSIXPKG_CORE_SOURCES
   src/verify.cpp
   src/certstore.cpp
   src/deployment.cpp
+  src/state.cpp
+  src/log.cpp
+  src/arp.cpp
+  src/installer.cpp
+  src/ops.cpp
 )
 
 add_library(msixpkg_core STATIC ${MSIXPKG_CORE_SOURCES})
@@ -90,6 +95,8 @@ add_executable(msixpkg_native_tests
   tests/vectors_tests.cpp
   tests/certstore_tests.cpp
   tests/deployment_tests.cpp
+  tests/deployment_exception_tests.cpp
+  tests/state_tests.cpp
 )
 target_link_libraries(msixpkg_native_tests PRIVATE msixpkg_core)
 # 白盒测试：允许直接包含内部头（json/inflate/zip 都是两端共享的格式契约，值得单独覆盖）。
@@ -104,8 +111,18 @@ target_compile_definitions(msixpkg_native_tests PRIVATE
   MSIXPKG_REPO_ROOT="${MSIXPKG_REPO_ROOT}"
 )
 
+# ---------- 命令行前端 ----------
+add_executable(msixpkg_native cli/main.cpp)
+target_link_libraries(msixpkg_native PRIVATE msixpkg_core)
+target_include_directories(msixpkg_native PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_options(msixpkg_native PRIVATE /utf-8 /W4 /permissive- /EHsc /Zc:__cplusplus)
+if(MSIXPKG_WARNINGS_AS_ERRORS)
+  target_compile_options(msixpkg_native PRIVATE /WX)
+endif()
+# 控制台子系统：入口是 wmain（argv 直接拿到宽字符，避免代码页把中文路径拆坏）。
+set_target_properties(msixpkg_native PROPERTIES OUTPUT_NAME "msixpkg-native")
+
 # 用 VS 的调试器跑测试时能直接命中源码
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT msixpkg_native_tests)
-
 enable_testing()
 add_test(NAME vectors COMMAND msixpkg_native_tests)

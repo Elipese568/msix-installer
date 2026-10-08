@@ -39,6 +39,11 @@ std::vector<std::string> split(std::string_view text, char separator);
 std::wstring widen_utf8(std::string_view text);
 std::string narrow_utf8(std::wstring_view text);
 
+/// Windows 命令行参数引用：含空格/制表/引号时按 CommandLineToArgvW 的反解析规则加引号。
+/// ARP 的 UninstallString 与提权助手的参数都靠它，否则带空格的路径会被拆成两个参数。
+std::wstring quote_argument(std::wstring_view value);
+std::string quote_argument(std::string_view value);
+
 // ---------- 小端读取 ----------
 
 inline uint16_t read_le16(const uint8_t* data) {

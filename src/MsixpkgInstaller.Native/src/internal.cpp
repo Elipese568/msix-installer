@@ -152,6 +152,46 @@ std::string narrow_utf8(std::wstring_view text) {
     return result;
 }
 
+std::wstring quote_argument(std::wstring_view value) {
+    const bool needs_quoting =
+        value.empty() || value.find_first_of(L" \t\n\v\"") != std::wstring_view::npos;
+    if (!needs_quoting) {
+        return std::wstring(value);
+    }
+
+    // CommandLineToArgvW 的反解析规则：反斜杠只在引号前成对翻倍。
+    std::wstring result;
+    result.push_back(L'"');
+    for (auto cursor = value.begin();; ++cursor) {
+        size_t backslashes = 0;
+        while (cursor != value.end() && *cursor == L'\\') {
+            ++cursor;
+            ++backslashes;
+        }
+
+        if (cursor == value.end()) {
+            result.append(backslashes * 2, L'\\');
+            break;
+        }
+
+        if (*cursor == L'"') {
+            result.append(backslashes * 2 + 1, L'\\');
+            result.push_back(L'"');
+            continue;
+        }
+
+        result.append(backslashes, L'\\');
+        result.push_back(*cursor);
+    }
+
+    result.push_back(L'"');
+    return result;
+}
+
+std::string quote_argument(std::string_view value) {
+    return narrow_utf8(quote_argument(widen_utf8(value)));
+}
+
 Bytes read_file(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
