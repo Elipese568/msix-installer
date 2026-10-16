@@ -7,14 +7,30 @@
 
 | 威胁 | 防护 |
 |---|---|
-| 攻击者自造 `.msixpkg` 夹带自己的根证书，从而获得任意代码的签名信任 | **发布者指纹钉扎**：`HKLM\SOFTWARE\MsixpkgInstaller\AllowedPublishers` 存允许的 SHA-256 指纹白名单（管理员预先部署）。未命中 → 默认拒绝；仅 `--trust-publisher <thumbprint>` + 同意 UI 才 TOFU，并写审计日志 |
-| 偷换载荷：容器签名者、内嵌证书、实际 `.msix` 签名者三者不一致 | **四重身份交叉校验**：容器签名者 == `publisher.cer` 指纹 == 内层 `AppxSignature.p7x` 签名者指纹 == Appx 清单 `Publisher` |
+| 攻击者自造 `.msixpkg` 夹带自己的根证书，从而获得任意代码的签名信任 | **发布者指纹钉扎**：`HKLM\SOFTWARE\MsixpkgInstaller\AllowedPublishers` 存允许的 SHA-256 指纹白名单（管理员预先部署）。未命中 → 默认拒绝；仅 `--trust-publisher <thumbprint>` + 同意 UI 才 TOFU，并写审计日志 || 偷换载荷：容器签名者、内嵌证书、实际 `.msix` 签名者三者不一致 | **四重身份交叉校验**：容器签名者 == `publisher.cer` 指纹 == 内层 `AppxSignature.p7x` 签名者指纹 == Appx 清单 `Publisher` |
 | 只验容器签名是否足够 | 不够也不必要：容器签名只用于「在导入信任之前确认来源身份」；**真正的内容密码学校验由 Windows 部署栈在 `AddPackageByUriAsync` 时完成** |
 | 信任范围过大 | 只写 `LocalMachine\TrustedPeople`，**永不写 `Root`**；只写 `LocalMachine`（部署栈不认用户级存储） |
 | TOCTOU：校验通过后、安装之前替换暂存文件 | 暂存目录 `%ProgramData%\Msixpkg\staging\<random>\`，ACL 仅 Administrators + SYSTEM；若校验复用了已解包的主包，**必须重新核对大小与 SHA-256**（`E_SIZE_MISMATCH` / `E_HASH_MISMATCH`）；Windows 11 build 23504+ 再叠加 `AddPackageOptions.ExpectedDigests` |
 | ZIP 炸弹 / 路径穿越 / ADS / 大小写重复 | 格式规范 §2.1、§5 的条目白名单与限额，拒绝优先于容错 |
 | 卸载误删他人信任的证书 | 引用计数 + Publisher 比对 + `certExistedBefore` 判定（见 §3） |
 | 开发期后门 | `--allow-unsigned` 只在 `#ifdef MSIXPKG_DEV` 下编译进 Debug 配置，Release 构建不存在这条路径 |
+
+### 1.1 钉扎的实现（`src/policy.{h,cpp}`，M4–M7 落地）
+
+允许的发布者指纹是**三个来源的并集**，任何一个命中都算「已钉扎」：
+
+1. **管理员部署的机器级白名单**（上面那条注册表路径）。两种约定都支持：
+   值 `AllowedPublishers`（`REG_MULTI_SZ`，一项一个指纹；也接受 `;` `,` 换行分隔的 `REG_SZ`），
+   或**同名子键**下的值（值名随意，值数据是指纹）。白名单是运维手工建的，不该逼他们猜格式。
+2. **调用方显式给的 `--pin <sha256>`**（可重复）。
+3. **用户之前明确勾选过「信任此发布者（将记住）」的 TOFU 记录**，落在
+   `<数据根>\publishers.json`（默认 `%ProgramData%\Msixpkg\publishers.json`，与状态库同样原子写）。
+
+这三条都很重要，尤其第 3 条：**没有它，UI 上的「将记住」就是一句假话** —— 用户下次安装会被
+再问一遍，而复选框却在暗示不用再问。删掉 `publishers.json` 里的某一条即可让安装器重新询问。
+
+未命中时：默认拒绝；只有「同意提供方明确批准 **且** 勾选信任此发布者」才继续，并在安装日志里
+留下 `audit:` 行（命中白名单 / 记住过 / 显式同意 三种情况分别记录）。
 
 ## 2. 为什么容器签名不查链信任
 

@@ -1,0 +1,105 @@
+name: ci
+
+# 三段互相独立的验证：
+#   managed  —— 托管库 + 打包器 + 126 条 xunit v3 测试（注意：不是 dotnet test）
+#   native   —— C++ 原生核心/安装器（Release + /WX）+ 50 条原生测试
+#   e2e      —— 容器校验、计划、失败上报的负例套件（不需要管理员，也不需要真实安装）
+#
+# 真实安装/卸载的闭环不在这里跑：它需要管理员、需要 AppXSvc，而且会真的改动运行器
+# 的证书存储与包仓库。那部分由 tests/e2e/msixpkg-e2e.ps1 在专用机器或
+# Windows Sandbox 里执行（见 tests/e2e/README.md）。
+
+on:
+  push:
+    branches: [main, master, prod, 'feature/**']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  managed:
+    name: managed (net9.0 + packer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          # 仓库里没有 .NET 8；Msixpkg.Core 多目标 netstandard2.0;net9.0，
+          # Msixpkg.Build 要能进 MSBuild 的 .NET Framework 宿主。
+          dotnet-version: '9.0.x'
+
+      - name: build
+        run: dotnet build MsixpkgInstaller.slnx -c Release --nologo
+
+      - name: build tests
+        run: dotnet build tests\Msixpkg.Core.Tests -c Release --nologo
+
+      - name: run managed tests
+        # xunit v3 产出的是普通可执行程序：本机的 VSTest testhost 需要打开父进程句柄，
+        # 在受限环境里会被拒绝（Win32Exception(5)），所以全仓库统一不用 dotnet test。
+        run: tests\Msixpkg.Core.Tests\bin\Release\net9.0\Msixpkg.Core.Tests.exe
+
+  native:
+    name: native (MSVC + C++/WinRT)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure
+        # 本地 preset 用的是「Visual Studio 18 2026」生成器（这台开发机上的版本），
+        # 托管运行器上只有 VS 2022，所以 CI 显式指定生成器，不复用 preset。
+        # 找不到 Windows SDK 的 cppwinrt 投影头时可以用 -DMSIXPKG_CPPWINRT_INCLUDE=<dir> 覆盖。
+        run: >
+          cmake -S src/MsixpkgInstaller.Native -B build/ci-native
+          -G "Visual Studio 17 2022" -A x64
+          -DMSIXPKG_WARNINGS_AS_ERRORS=ON
+
+      - name: build (Release, warnings as errors)
+        run: cmake --build build/ci-native --config Release --parallel
+
+      - name: run native tests
+        run: build\ci-native\Release\msixpkg_native_tests.exe
+
+      - name: cross-language check (native validator on the C#-produced golden container)
+        # 这条断言的是「两端对同一份黄金样本的看法一致」：容器校验、钉扎、内容摘要。
+        run: >
+          build\ci-native\Release\msixpkg-native.exe install
+          tests\vectors\Msixpkg.Sample_1.0.0.0_x64.msixpkg
+          --pin 9cd702035dd941aa6fe12870550ffc61633281da08839cfb0dfb3a95e1b913b9
+          --require-pin --dry-run
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-binaries
+          path: |
+            build/ci-native/Release/msixpkg-native.exe
+            build/ci-native/Release/msixpkg_native_tests.exe
+          if-no-files-found: warn
+
+  e2e-negative:
+    name: e2e negative suite
+    runs-on: windows-latest
+    needs: native
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure
+        run: >
+          cmake -S src/MsixpkgInstaller.Native -B build/ci-native
+          -G "Visual Studio 17 2022" -A x64
+          -DMSIXPKG_WARNINGS_AS_ERRORS=ON
+
+      - name: build
+        run: cmake --build build/ci-native --config Debug --parallel
+
+      - name: negative E2E
+        # 不需要管理员、不需要真实安装，因此在托管运行器上可以跑。
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File tests\e2e\msixpkg-negative.ps1
+          -ExePath build\ci-native\Debug\msixpkg-native.exe

@@ -1,0 +1,33 @@
+<!--
+  Windows Sandbox 配置：在干净环境里跑安装 / 卸载 E2E。
+
+  用法（宿主机需要启用「Windows 沙盒」可选功能，并在 BIOS 里打开虚拟化）：
+    1. 把下面的 HostFolder 改成这台机器上的仓库路径（绝对路径，必须存在）；
+    2. 双击本文件，或在 PowerShell 里执行：
+         WindowsSandbox.exe tests\e2e\msixpkg-e2e.wsb
+    3. 沙盒会以管理员身份登录并自动执行 sandbox-run.ps1。
+
+  两个已经踩过的限制，写在这里省得再踩：
+    * 沙盒里**没有** Visual Studio / CMake / .NET SDK，所以不能在里面编译。
+      映射进来的是**构建产物**（src\...\build\x64\Release\*.exe），不是源码树。
+    * 这些 exe 是动态链接 MSVC 运行库的，沙盒里没有它。要么先把
+      vc_redist.x64.exe 放进 artifacts\ 并在脚本里先装，要么把工程改成静态链接 CRT
+      （CMake: set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")）。
+-->
+<Configuration>
+  <!-- 仓库根目录：改成这台机器上的绝对路径。 -->
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>D:\work\source\repos\MsixpkgInstaller</HostFolder>
+      <SandboxFolder>C:\msixpkg</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+
+  <Networking>Disable</Networking>
+  <MemoryInMB>8192</MemoryInMB>
+
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\msixpkg\tests\e2e\sandbox-run.ps1</Command>
+  </LogonCommand>
+</Configuration>

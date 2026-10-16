@@ -44,7 +44,7 @@ src/MsixpkgInstaller.Native/
 ### 2.2 后续里程碑的落点
 
 `gui/`、`cli/`、`res/`（`.rc` 与字符串表）、`core/certstore`、`core/deployment`、`core/state`、`core/log`
-尚未创建，都属于 M4–M6（见 §10）。Win32 GUI 与 `.rc` 资源可以直接加进同一个 CMake 工程
+都已按 M4–M6 建立（见 §10 的实际布局）。Win32 GUI 与 `.rc` 资源直接加进同一个 CMake 工程
 （`target_sources` + `win32` 子系统），无需切换构建系统。
 
 
@@ -239,7 +239,7 @@ HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Msixpkg.<IdentityName>
 
 ## 10. 实现进度
 
-### M3 ✅ 完成（21 条原生测试全绿）
+### M3 ✅ 完成
 
 已完成并验证：
 
@@ -263,17 +263,54 @@ HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Msixpkg.<IdentityName>
 （`E_CONTAINER_INVALID`），而 .NET 的 `ZipArchive` 不校验 CRC，会走到 `E_HASH_MISMATCH`。
 规范 §5 明确允许两条探测路径，GUI 必须把两者视为同一类完整性失败。
 
-### 待办
+### M4–M7 ✅ 完成
 
-1. **M4**：`certstore`（crypt32 增/查/删 TrustedPeople）+ `deployment`（C++/WinRT `PackageManager`）
-   + `state`（原子 JSON 状态库）+ `log` + CLI 前端 + `interface.h`；命令行跑通一次安装/卸载。
-2. **M5**：引用计数、`list/verify/repair/clean`、ARP 卸载入口。
-3. **M6**：GUI 向导（四页 + 管理页、DPI/深色/本地化/无障碍）+ `app.manifest` + `.rc`。
-4. **M7**：Windows Sandbox E2E、CI、文档定稿。
+| 模块 | 文件 | 说明 |
+|---|---|---|
+| 证书存储 | `src/certstore.{h,cpp}` | 只写 `LocalMachine\TrustedPeople`（位置是枚举，类型上不可能写出 `Root`）；`add` 返回 `{added, existedBefore}`；写前三级校验（DER 可解析 / 指纹 20 字节 / 指纹必须与证书实际值一致） |
+| 部署封装 | `src/deployment.{h,cpp}` | C++/WinRT `PackageManager`：`AddPackageByUriAsync` / `RemovePackageAsync` / `FindPackagesForUser` / provisioning；对外函数全部包在 `guard_winrt` 里（见 §11 坑 2、3） |
+| 部署错误码表 | `src/deployment_errors.generated.h` | 由 `scripts/generate-deployment-errors.ps1` 从 SDK `winerror.h` 生成 128 条，运行时翻译成稳定码 + 一句可操作提示 |
+| 状态库 | `src/state.{h,cpp}` | `%ProgramData%\Msixpkg\{state,staging,logs}`；数据根带可写性探测回落链；状态一律**原子写**（临时文件 → `FlushFileBuffers` → `ReplaceFile`） |
+| 日志 | `src/log.{h,cpp}` | 每行 open→append→close，主进程与提权助手共写同一份 |
+| 前端接口 | `src/interface.h` | `IProgressSink` / `IConsentProvider` / `ICancelSource` + `Phase`/`ConsentRequest`；GUI / console / silent 三种前端共用 |
+| 编排 | `src/installer.{h,cpp}` | 安装/卸载状态机（§5）、`plan()` 只读预演、钉扎与 TOFU、提权助手协议、回滚、证书回收判定 |
+| ARP | `src/arp.{h,cpp}` | HKLM 优先、HKCU 回落的「设置 → 应用」卸载入口 |
+| 运维 | `src/ops.{h,cpp}` | `list` / `verify` / `repair` / `clean`；**repair 只输出建议** |
+| 钉扎策略 | `src/policy.{h,cpp}` | 机器级白名单（注册表，两种布局都支持）+ TOFU 记忆（`<数据根>\publishers.json`）；`remember_publisher` 让 UI 上那句「将记住」真的落盘 |
+| CLI | `cli/main.cpp` | 八个子命令 + 退出码 0–7 |
+| GUI | `gui/`、`res/`、`app.manifest` | Win32 向导：SUMMARY / CONSENT / PROGRESS / RESULT / MANAGE；标准控件 + WS_TABSTOP + `IsDialogMessage` 键盘导航 |
 
-尚未在原生侧覆盖的用例（当前由 C# 套件覆盖）：
-未签名容器、证书过期/未生效、错误 EKU 的容器 —— 需要 C# 侧生成对应负例向量后再补测。
+`Installer::plan()` 是只读预演入口：一次给出「校验结果 + 同意请求（`ConsentRequest`）+ 动作清单」，
+且**零副作用**（不建目录、不写日志、不碰证书存储）；`--dry-run`、摘要页、同意页共用它。
+这样「界面显示的正文」与「安装时真正据以决策的内容」天然一致，不必让前端自己再 `validate()` 一遍
+（那种重复迟早会和编排里的钉扎判定漂移）。
 
-> 单元测试的证书存储用例请用 `CERT_SYSTEM_STORE_CURRENT_USER` 下的自定义存储，
-> 避免污染真实的 `LocalMachine\TrustedPeople`。
+尚未在原生侧覆盖的用例已补齐（T7）：未签名容器、证书过期、错误 EKU 三个**单缺陷负例向量**
+（`tests/vectors/negative-*.msixpkg`）在两端都有断言。
+
+> 单元测试的证书存储用例原来计划用 `CERT_SYSTEM_STORE_CURRENT_USER` 下的自定义存储，
+> 但实测本执行环境拒绝**任何** HKCU 注册表写操作（`RegCreateKeyEx` 与 `CertOpenStore`
+> 写打开都返回 5 = `ERROR_ACCESS_DENIED`），且序列化文件存储在 `CertCloseStore` 后不落盘。
+> 最终改用 `CERT_STORE_PROV_MEMORY`：CRUD 路径与注册表存储完全相同，却不依赖注册表与管理员。
+> 「真实 `LocalMachine\TrustedPeople` 的持久化」由 `tests/e2e/msixpkg-e2e.ps1` 在提权环境覆盖。
+
+## 11. M4–M7 施工期间新踩到的坑
+
+| # | 坑 | 正确做法 |
+|---|---|---|
+| 1 | HKCU 注册表写被拒（受限执行环境） | 状态库/日志必须带**可写性探测回落链**；证书存储的单元测试改用 `CERT_STORE_PROV_MEMORY` |
+| 2 | `winrt::hresult_error` **不继承 `std::exception`**，逃出部署层后 `catch (const std::exception&)` 接不住 → `std::terminate` → `abort` → 退出码 3，且 stdout 缓冲来不及 flush（表现为「零输出 + 进程消失」） | 部署层每个对外函数都包在 `guard_winrt` 里，统一翻译成 `msixpkg::Error`；CLI 再兜一层 `catch (...)` |
+| 3 | `AddPackageByUriAsync` 会返回 **S_OK 但操作指针为 null**；对空对象调 `operation.Progress(...)` 直接访问违例（`0xC0000005`，`/EHsc` 下 `catch(...)` 也接不住） | 每个异步 API 之后先 `require_operation()` 验有效再用 |
+| 4 | `$ENV{ProgramFiles(x86)}` 在 CMake 里是**语法错误**（`$ENV{}` 名字不允许括号） | 从注册表读 `KitsRoot10` 定位 SDK |
+| 5 | `winerror.h` 在 SDK 的 `shared\` 下，不是 `um\`；`ERROR_INSTALL_*` 是十进制 Win32 码（要按 `HRESULT_FROM_WIN32` 归一化），`APPX_*`/`TRUST_E_*` 是 `_HRESULT_TYPEDEF_` 十六进制 | 生成脚本按两种形式分别处理 |
+| 6 | C++/WinRT 投影里结构体字段是**小写**（`state.percentage`），不是 `Percentage()` | 查 `<SDK>\cppwinrt\winrt\impl\*.2.h` 里的结构体定义 |
+| 7 | `for (auto const& x : collection) { ...; break; }` 里 break 之后的递增表达式不可达 → C4702，`/WX` 下直接失败 | 用迭代器（`First()/HasCurrent()`）或去掉 break |
+| 8 | `.ps1` 含非 ASCII 文本却没有 UTF-8 BOM → PowerShell 5.1 按 ANSI 解析，**语法错误** | E2E 脚本一律纯 ASCII（中文放 README.md）；必须中文时显式写 BOM |
+| 9 | PS 5.1 在 `$ErrorActionPreference='Stop'` 下把原生命令的 stderr 变成**终止性** `NativeCommandError` | 脚本改用 `'Continue'`，正确性由显式退出码断言保证 |
+| 10 | `cmd /c "... & echo %ERRORLEVEL%"` 打印的是**执行前**的旧值（整行解析时就展开了） | 用 `$LASTEXITCODE`，或分开两次调用 |
+| 11 | `CHECK_EQ(store.load(id)->result, ...)`：`auto&&` 绑定到临时 `optional` 的成员，语句结束即悬垂 | 先存成具名 `optional` 再解引用 |
+| 12 | 本地 `file_size(path)` 与 `std::filesystem::file_size` 通过 ADL 一起进重载集 → 调用有歧义 | 换个名字（`path_file_size`） |
+| 13 | `$Pid` / `$Args` / `$Home` 等是 PowerShell **只读自动变量**：写成 `param([int]$Pid)` 会直接报错；更阴的是脚本体里误用 `$Pid` 时它**有意义**（当前 pwsh 进程号），于是「找不到目标窗口」这种看似环境问题其实是自己搞错了 PID | 参数换名（`-ProcessId`）；脚本里不要用自动变量名当自己的变量 |
+| 14 | 一次「预览」就把 `%ProgramData%\Msixpkg` 建出来、写日志、甚至收紧 ACL | 只读预演走 `peek_data_roots()`（绝不创建）；`plan()` / `--dry-run` 零副作用，由测试与 E2E 双向钉住 |
+
 

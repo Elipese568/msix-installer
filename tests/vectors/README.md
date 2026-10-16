@@ -10,6 +10,13 @@
 | `sample-dependency.msix` | 合成依赖包（扮演 `Microsoft.VCLibs.140.00.UWPDesktop`） |
 | `Msixpkg.Sample_1.0.0.0_x64.msixpkg` | 黄金容器，由上面三者按规范组装 |
 | `real-appxsignature.p7x` | **真实** Appx 签名：从一个真机构建的 WinUI 3 单项目 MSIX 里抽出（1538 字节，`PKCX` 头 + DER SignedData，签名者 `CN=AppPublisher`） |
+| `negative-unsigned.msixpkg` | 负例：有 `msixpkg.json` 与 `publisher.cer`，**没有** `msixpkg.sig` → `E_SIGNATURE_MISSING` |
+| `negative-expired.msixpkg` | 负例：证书有效期整段落在过去（30 天前起、1 天有效） → `E_CERTIFICATE_EXPIRED` |
+| `negative-wrong-eku.msixpkg` | 负例：证书只有 `serverAuth`，没有 `codeSigning` → `E_CERTIFICATE_NOT_CODE_SIGNING` |
+
+三个负例都刻意做成**单缺陷**：它们的内层 `.msix` 用**与容器证书配套**的证书重新合成，
+所以被拒的原因唯一。否则内层 Appx 的发布者或签名者指纹会先一步对不上，
+断言就分不清到底是被哪条规则拦下的（两端的测试都会额外断言「没有 `E_APPX_*` 噪音」）。
 
 黄金容器的 SHA-256（审计用）：
 
@@ -54,7 +61,10 @@ tests\Msixpkg.Core.Tests\bin\Debug\net9.0\Msixpkg.Core.Tests.exe
 
 - `test-only.pfx` / `sample-*.msix` **只在缺失时创建**，之后固定不变（`SignedCms` 的 signingTime
   会让每次签名产出不同字节，因此合成包必须固化为文件，不能在每次测试里重新生成）；
-- 黄金容器**每次重新构建**，因此 `RegenerationIsByteIdenticalToCommittedVector` 能检测格式漂移。
+- 黄金容器**每次重新构建**，因此 `RegenerationIsByteIdenticalToCommittedVector` 能检测格式漂移；
+- 三个负例容器（`negative-*.msixpkg`）每次重新生成：它们各自带一个临时生成的证书，
+  内层 `.msix` 也随证书重新合成（中间产物落在 `artifacts/tests/negative-inputs/`）。
+  它们**不**参与逐字节比对，只参与错误码断言。
 
 ## 关于 `AppxSignature.p7x`
 
