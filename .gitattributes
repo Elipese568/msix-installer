@@ -19,3 +19,8 @@
 *.rc text eol=crlf
 *.h text eol=crlf
 *.cpp text eol=crlf
+
+# 逐字节比对的 JSON 夹具：原生测试直接把它跟容器里 msixpkg.json 条目的字节比。
+# .json 默认没有任何规则，在 core.autocrlf=true 的机器（含 CI 运行器）上会被签出成 CRLF，
+# 于是这两条断言在 CI 上红、在本机绿 —— 必须钉死 LF。
+tests/vectors/*.json text eol=lf
