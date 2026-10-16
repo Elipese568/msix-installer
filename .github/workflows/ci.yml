@@ -77,13 +77,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: pick the Visual Studio generator
+        # 运行器镜像会换：windows-latest 自 2026-06 起是 Windows Server 2025 + VS 2026
+        # （actions/runner-images#14017），写死 -G "Visual Studio 17 2022" 会直接
+        # “could not find any instance of Visual Studio” 失败。
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\detect-vs-generator.ps1"
+          if ($LASTEXITCODE -ne 0) { throw 'Visual Studio generator detection failed' }
+
       - name: configure
-        # 本地 preset 用的是「Visual Studio 18 2026」生成器（这台开发机上的版本），
-        # 托管运行器上只有 VS 2022，所以 CI 显式指定生成器，不复用 preset。
+        # CI 不复用本地 preset（那里写死了 "Visual Studio 18 2026"）。
         # 找不到 Windows SDK 的 cppwinrt 投影头时可以用 -DMSIXPKG_CPPWINRT_INCLUDE=<dir> 覆盖。
         run: >
           cmake -S src/MsixpkgInstaller.Native -B build/ci-native
-          -G "Visual Studio 17 2022" -A x64
+          -G "${{ env.MSIXPKG_CMAKE_GENERATOR }}" -A x64
           -DMSIXPKG_WARNINGS_AS_ERRORS=ON
 
       - name: build (Release, warnings as errors)
@@ -116,10 +124,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: pick the Visual Studio generator
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\detect-vs-generator.ps1"
+          if ($LASTEXITCODE -ne 0) { throw 'Visual Studio generator detection failed' }
+
       - name: configure
         run: >
           cmake -S src/MsixpkgInstaller.Native -B build/ci-native
-          -G "Visual Studio 17 2022" -A x64
+          -G "${{ env.MSIXPKG_CMAKE_GENERATOR }}" -A x64
           -DMSIXPKG_WARNINGS_AS_ERRORS=ON
 
       - name: build
@@ -138,10 +152,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: pick the Visual Studio generator
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\detect-vs-generator.ps1"
+          if ($LASTEXITCODE -ne 0) { throw 'Visual Studio generator detection failed' }
+
       - name: configure
         run: >
           cmake -S src/MsixpkgInstaller.Native -B build/ci-native
-          -G "Visual Studio 17 2022" -A x64
+          -G "${{ env.MSIXPKG_CMAKE_GENERATOR }}" -A x64
           -DMSIXPKG_WARNINGS_AS_ERRORS=ON
 
       - name: build payload (Release)
