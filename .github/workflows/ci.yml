@@ -2,9 +2,13 @@ name: ci
 
 # 四段互相独立的验证：
 #   managed       —— 托管库 + 打包器 + 132 条 xunit v3 测试（注意：不是 dotnet test）
-#   nuget-package —— Msixpkg.Build 的 NuGet 包：包布局 + PackageReference 消费 + 黄金样本逐字节比对
 #   native        —— C++ 原生核心/安装器（Release + /WX）+ 58 条原生测试
 #   e2e           —— 容器校验、计划、失败上报的负例套件（不需要管理员，也不需要真实安装）
+#   nsis-package  —— 分发安装包：构建 setup.exe，并真的装一次 / 卸一次
+#
+# NuGet 包 Msixpkg.Build 的「构建 + 发布」在 .github/workflows/nuget-publish.yml；
+# 它的验收（包布局 / PackageReference 消费 / 两个 MSBuild 宿主 / 与黄金样本逐字节比对）是
+# 本机脚本 tests\e2e\nuget-package-e2e.ps1，刻意不占 CI。
 #
 # 真实安装/卸载的闭环不在这里跑：它需要管理员、需要 AppXSvc，而且会真的改动运行器
 # 的证书存储与包仓库。那部分由 tests/e2e/msixpkg-e2e.ps1 在专用机器或
@@ -43,33 +47,6 @@ jobs:
         # xunit v3 产出的是普通可执行程序：本机的 VSTest testhost 需要打开父进程句柄，
         # 在受限环境里会被拒绝（Win32Exception(5)），所以全仓库统一不用 dotnet test。
         run: tests\Msixpkg.Core.Tests\bin\Release\net10.0\Msixpkg.Core.Tests.exe
-
-  nuget-package:
-    name: nuget package (pack + PackageReference acceptance)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
-      - name: pack Msixpkg.Build and accept it
-        # 这一段同时覆盖两个宿主：.NET SDK 的 MSBuild 与 Visual Studio 的 .NET Framework MSBuild
-        # （-RequireVsMsBuild：托管运行器上有 VS，找不到就该红，而不是静默跳过）。
-        # 判定标准是产出的 .msixpkg 与 tests\vectors 里的黄金样本逐字节相同，且每个条目都是 store。
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass
-          -File tests\e2e\nuget-package-e2e.ps1 -RequireVsMsBuild
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: nuget-package
-          path: |
-            artifacts/nuget/*.nupkg
-            samples/MsixpkgPackageSample/artifacts/*.msixpkg
-          if-no-files-found: warn
 
   native:
     name: native (MSVC + C++/WinRT)

@@ -1,0 +1,110 @@
+name: nuget-publish
+
+# 只干一件事：把构建期打包工具 Msixpkg.Build 构建出来、发到 nuget.org。
+# 「包能不能用」的验收不在这里 —— 那是本机的 tests\e2e\nuget-package-e2e.ps1
+# （包布局 / PackageReference 消费 / 两个 MSBuild 宿主 / 与黄金样本逐字节比对）。
+#
+# 需要你在平台侧做的一次性准备：
+#   1) nuget.org → 用户名菜单 → Trusted Publishing → Add a new policy：
+#        Repository Owner : Elipese568
+#        Repository       : msix-installer
+#        Workflow File    : nuget-publish.yml   （只填文件名，不要带 .github/workflows/）
+#        Environment      : 留空
+#   2) GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret：
+#        NUGET_USER = 你在 nuget.org 的**用户名（profile name）**，不是邮箱
+#      工作流凭 GitHub OIDC 换一个 1 小时有效的临时 Key，仓库里不存任何长期密钥。
+#
+# 发布方式：
+#   * 打 tag：git tag v0.1.0 && git push origin v0.1.0   → 发布 0.1.0
+#   * 手动：Actions → nuget-publish → Run workflow（可填版本号；dry_run=true 时只构建不发布）
+#
+# 注意：nuget.org 上「包 ID + 版本」一旦发布就不能覆盖，重跑同一版本只会被 --skip-duplicate 跳过。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的包版本（如 0.2.0）。留空：tag 触发取 tag 名去 v，手动触发取 Directory.Build.props 里的默认值'
+        required: false
+        type: string
+      dry_run:
+        description: '只构建包并上传 artifact，不发布到 nuget.org'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  publish:
+    name: pack + publish Msixpkg.Build
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC：向 nuget.org 换临时 API key
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: resolve the package version
+        id: version
+        shell: pwsh
+        run: |
+          $requested = '${{ inputs.version }}'
+          if ($requested) {
+            $version = $requested.Trim()
+          }
+          elseif ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          }
+          else {
+            $props = [xml](Get-Content -Raw Directory.Build.props)
+            $version = $props.Project.PropertyGroup.Version
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?(-[0-9A-Za-z\.\-]+)?$') {
+            throw "包版本不合法：'$version'（期望 1.2.3 / 1.2.3.4 / 1.2.3-preview.1）"
+          }
+
+          "MSIXPKG_PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "将发布的版本：$version"
+
+      - name: pack Msixpkg.Build
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File scripts\pack-nuget.ps1 -Version ${{ steps.version.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msixpkg-build-nupkg
+          path: artifacts/nuget/*.nupkg
+          if-no-files-found: error
+
+      - name: NuGet login (OIDC → 临时 API key)
+        if: ${{ inputs.dry_run != true }}
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: NuGet push
+        if: ${{ inputs.dry_run != true }}
+        shell: pwsh
+        run: |
+          $package = Get-ChildItem -Path artifacts\nuget -Filter 'Msixpkg.Build.*.nupkg' | Select-Object -First 1
+          if (-not $package) { throw '没有产出 .nupkg，先看 pack 那一步' }
+
+          Write-Host "推送 $($package.Name)（版本 $env:MSIXPKG_PACKAGE_VERSION）到 nuget.org"
+          dotnet nuget push $package.FullName `
+            --source https://api.nuget.org/v3/index.json `
+            --api-key '${{ steps.login.outputs.NUGET_API_KEY }}' `
+            --skip-duplicate
+          if ($LASTEXITCODE -ne 0) { throw "dotnet nuget push 失败（退出码 $LASTEXITCODE）" }

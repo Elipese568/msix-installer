@@ -32,7 +32,7 @@
 | M6 | Win32 GUI 向导 + `app.manifest` + `res/*.rc` | ✅ |
 | M7 | Windows Sandbox E2E + CI + 文档定稿 | ✅ |
 | 分发 | NSIS 安装包（`installer/nsis/`）：把向导 + CLI 装到用户机器，含快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口；另出便携 zip（`%TEMP%` 写不了的容器/沙箱用） | ✅ 46 项 E2E + PATH 逻辑 13 个 NSIS 用例；注册表效果断言需在普通机器/CI 上跑（受限环境子进程写不了 HKCU） |
-| NuGet | `Msixpkg.Build` 任务包（构建期自动产出 `.msixpkg`；Core 作为二进制附属随包） | ✅ MIT；25 项包验收（包布局 + PackageReference 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致）；发布到 nuget.org 待接 |
+| NuGet | `Msixpkg.Build` 任务包（构建期自动产出 `.msixpkg`；Core 作为二进制附属随包） | ✅ MIT；25 项包验收（包布局 + PackageReference 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致）；发布走 `nuget-publish.yml`（tag / 手动触发，OIDC） |
 
 **在本机能验证的范围内全部验证过**（详见 §5）；真实安装 / 卸载闭环在本机受限执行环境里
 跑不了 —— 见 §5 第 3 条，脚本已经写好，需要在提权环境或 Windows Sandbox 里执行。
@@ -114,9 +114,13 @@ src\MsixpkgInstaller.Native\build\x64\Debug\msixpkg-native.exe install `
 powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 # 期望：checks 33, failures 0
 
-# NuGet 包：打包 + 包布局 + PackageReference 消费 + 黄金样本逐字节比对（不需要管理员）
+# NuGet 包：打包 + 包布局 + PackageReference 消费 + 黄金样本逐字节比对（不需要管理员；只在本机跑）
 powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
 # 期望：25 项检查全过（两个 MSBuild 宿主都产出 EA972886…A986；找不到 VS 时第二个宿主会跳过）
+
+# 发布 Msixpkg.Build 到 nuget.org：由 CI 做（OIDC，无需长期密钥）
+git tag v0.2.0; git push origin v0.2.0     # 或在 Actions 里手动 Run workflow（可 dry_run=true）
+# 需要先在 nuget.org 建信任策略 + 仓库加 Secret NUGET_USER，见 docs/nuget-package.md §5
 
 # 分发安装包（NSIS）：构建 + 安装/卸载验收（都不需要管理员）
 powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1
@@ -199,7 +203,11 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
    不声明成 NuGet 依赖）。`Msixpkg.Core` 与 `Msixpkg.Packer` 都不再 `IsPackable`：前者随包走，
    后者是开发机 / CI 的构建期 CLI。本地验收：`scripts\pack-nuget.ps1` +
    `tests\e2e\nuget-package-e2e.ps1`（见 [`nuget-package.md`](nuget-package.md)）。
-   **发到 nuget.org 的流水线还没接** —— 用户明确「后面再做」。
+   **发布流水线已接**：[`.github/workflows/nuget-publish.yml`](../.github/workflows/nuget-publish.yml)
+   用 nuget.org 的 **Trusted Publishing（OIDC）**，由 tag `v*` 或手动 `workflow_dispatch` 触发，
+   仓库里不存长期密钥。剩下的只是 owner 在平台侧点一次：nuget.org 建一条指向本仓库 /
+   `nuget-publish.yml` 的信任策略，仓库加一个 Secret `NUGET_USER`（nuget.org 用户名）。
+   **包的验收（那 25 项）刻意只留在本机脚本里，不占 CI。**
 4. ~~`.msixpkg` 文件关联（`HKLM\Software\Classes`）与「双击安装」体验。~~
    **已完成**：`.msixpkg` 关联（ProgID `Msixpkg.Package` → `msixpkg-installer.exe "%1"`，
    双击停在摘要页，绝不自动安装）由分发安装包 `installer/nsis/` 负责，
@@ -224,7 +232,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | 原生 CLI 对黄金样本的校验（跨语言门禁） | ✅ `--pin --require-pin --dry-run` exit 0 |
 | 负例 E2E（`tests/e2e/msixpkg-negative.ps1`） | ✅ 33 项检查全过（含「dry-run 连目录都不建」） |
 | `Msixpkg.Build` NuGet 包：包布局 / 元数据 / PackageReference 消费 / 两个 MSBuild 宿主下与黄金样本**逐字节相同** / 全部条目 store | ✅ `tests/e2e/nuget-package-e2e.ps1`：checks 25, failures 0 |
-| 包发布到 nuget.org | ⚠️ **未接**（用户决定「后面再做」；本地 feed 上的消费验收已通过） |
+| 包发布到 nuget.org | ⚠️ 流水线已接（`nuget-publish.yml`，OIDC + tag/手动触发）；**还没真正发布过** —— 需要 owner 先在 nuget.org 建信任策略并在仓库加 Secret `NUGET_USER` |
 | GUI：窗口起来、SUMMARY 内容正确 | ✅ 截图 + UIA 名称逐项核对 |
 | GUI：同意页的安全门 | ✅ 程序化断言：未勾「我了解并同意」→ 安装按钮禁用、信任框也禁用；未钉扎时**必须**再勾「信任此发布者」按钮才可用；取消勾选立刻回到禁用 |
 | GUI：PROGRESS / RESULT / MANAGE 的视觉 | ⚠️ MANAGE 有截图；PROGRESS / RESULT 到不了（要真装一次） |

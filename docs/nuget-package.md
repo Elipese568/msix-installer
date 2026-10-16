@@ -74,6 +74,10 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
 # 期望：25 项检查全过
 ```
 
+**验收刻意只在本机跑**：CI（[`ci.yml`](../.github/workflows/ci.yml)）负责托管/原生/E2E/NSIS 四段验证，
+NuGet 那条流水线（[`nuget-publish.yml`](../.github/workflows/nuget-publish.yml)）只负责「构建 + 发布」。
+需要复核包本身时，跑上面第二条命令即可。
+
 验收样例是 `samples\MsixpkgPackageSample`：它**不** `Import` 仓库里的 targets、**不** `ProjectReference`
 仓库里的工程，只用 `PackageReference`；`NuGet.config` 里 `<clear />` 掉全局源，只留本地 feed
 （`artifacts\nuget`），因此不受开发机上别的源与缓存影响。
@@ -81,16 +85,47 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
 在「不允许命名管道」的受限环境（沙箱 / 容器）里跑 `dotnet build` 需要
 `-m:1 -nodeReuse:false -p:UseSharedCompilation=false`；上面两个脚本已经内置（对两个小工程无成本）。
 
-## 5. 版本与发布现状
+## 5. 版本与发布（CI 负责构建与发布）
 
-* 版本号的事实来源是 `Directory.Build.props` 的 `0.1.0`；打包时可用 `-p:Version=` 覆盖
-  （`scripts\pack-nuget.ps1 -Version`）。样例工程里钉的版本要同步改。
-* **发到 nuget.org 的流水线还没接**（用户明确「后面再做」）。接的时候在 GitHub Actions 里加一段：
-  `dotnet pack` → 用仓库 Secrets 里的 `NUGET_API_KEY` 推
-  （`dotnet nuget push artifacts/nuget/*.nupkg --source https://api.nuget.org/v3/index.json --api-key ...`），
-  推荐只在打 tag（例如 `v0.1.0`）或手动 `workflow_dispatch` 时触发。
-* 发布前请确认 `Elipese568/msix-installer` 仓库已推送（包元数据里的 `RepositoryUrl` / `projectUrl`
-  指向它），`.nuspec` 的 `repository` 字段带的是打包时的 commit。
+版本号的事实来源是 `Directory.Build.props` 的 `0.1.0`；发布时由工作流覆盖
+（`scripts\pack-nuget.ps1 -Version <版本>`）。样例工程里钉的版本要同步改。
+
+发布走 [`.github/workflows/nuget-publish.yml`](../.github/workflows/nuget-publish.yml)：
+
+| 触发 | 版本来源 |
+|---|---|
+| 打 tag（`git tag v0.2.0 && git push origin v0.2.0`） | tag 名去掉 `v` → `0.2.0` |
+| Actions → nuget-publish → Run workflow（`version` 留空） | `Directory.Build.props` 里的默认版本 |
+| 手动 `workflow_dispatch` 填 `version` | 就用填的那个 |
+
+`dry_run=true` 时只构建并把 `.nupkg` 作为 artifact 传上来，不碰 nuget.org。
+
+### 5.1 一次性准备（只有仓库 owner 能做）
+
+1. **nuget.org** → 用户名菜单 → **Trusted Publishing** → Add a new policy：
+
+   | 字段 | 值 |
+   |---|---|
+   | Repository Owner | `Elipese568` |
+   | Repository | `msix-installer` |
+   | Workflow File | `nuget-publish.yml`（**只填文件名**，不要带 `.github/workflows/`） |
+   | Environment | 留空（工作流没有用 GitHub environment） |
+
+2. **GitHub 仓库** → Settings → Secrets and variables → Actions → New repository secret：
+   `NUGET_USER` = 你在 nuget.org 的**用户名（profile name）**，不是邮箱。
+
+工作流凭 GitHub OIDC 换一个 **1 小时有效的临时 API key** 再 `dotnet nuget push`：
+仓库里**不存任何长期密钥**，也不需要 `NUGET_API_KEY`。临时 key 用过即废，所以登录步骤紧挨推送步骤。
+
+### 5.2 注意事项
+
+* nuget.org 上「包 ID + 版本」**发布后不可覆盖**：重跑同一版本会被 `--skip-duplicate` 跳过，
+  要改内容就得换版本号。
+* 包的 `RepositoryUrl` / `projectUrl` 指向 `Elipese568/msix-installer`，`.nuspec` 的 `repository`
+  字段带的是打包时的 commit —— 发布前确认工作已经推上去。
+* 首次发布建议先用 `dry_run=true` 跑一次，核对 artifact 里的包内容。
+* 私有仓库的 Trusted Publishing 策略会先「临时生效」7 天，期间成功发布一次才永久激活；
+  本仓库是 public，一般直接可用。
 
 ## 6. 排错
 
