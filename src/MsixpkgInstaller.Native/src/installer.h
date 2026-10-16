@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "container.h"
 #include "deployment.h"
 #include "interface.h"
 #include "state.h"
@@ -29,10 +30,13 @@ inline constexpr char kInstallerVersion[] = "0.2.0";
 struct InstallOptions {
     std::filesystem::path container;
 
-    /// 允许的发布者 SHA-256 指纹白名单（小写）。空且 require_pinned_publisher=false 时，
-    /// 未命中钉扎会交给同意提供方决定（TOFU）。
+    /// 调用方显式给的白名单（CLI 的 `--pin`）。会与下面两个来源合并。
     std::vector<std::string> allowed_publisher_thumbprints;
     bool require_pinned_publisher = false;
+
+    /// 是否把「用户之前明确信任过」的发布者也算作已钉扎（TOFU 记忆）。
+    /// 关掉它 = 每次安装都重新问一遍。
+    bool use_remembered_publishers = true;
 
     bool allow_downgrade = false;
     bool all_users = false;
@@ -43,6 +47,45 @@ struct InstallOptions {
 
     /// 解包后是否保留暂存目录（排查用；默认失败也清、成功也清）。
     bool keep_staging = false;
+};
+
+/// 一次安装的**只读**预演结果：给 dry-run、GUI 摘要页 / 同意页用。
+///
+/// 之前 GUI 为了拿到同意页需要的发布者/包信息，只能自己把 `validate()` 再跑一遍 ——
+/// 那既重复又容易和编排里的判定漂移（例如钉扎结果）。现在两边共用这一个来源。
+struct InstallPlan {
+    bool valid = false;
+    std::string failure_code;
+    std::string failure_message;
+    std::string failure_detail;
+
+    std::filesystem::path container_path;
+    Manifest manifest;
+    bool has_manifest = false;
+    bool has_publisher_certificate = false;
+
+    std::string publisher_subject;
+    std::string certificate_sha1;
+    std::string certificate_sha256;
+    std::string content_digest;
+    std::string package_family_name;
+
+    /// 命中「管理员白名单 / 显式 --pin / 之前记住的」中的任意一个。
+    bool publisher_pinned = false;
+    /// 只命中了「之前记住的」（用于同意页上区分「管理员批准」与「你自己上次同意的」）。
+    bool publisher_remembered = false;
+    /// 该证书是否**已经**在本机受信任人员存储里。
+    bool certificate_already_trusted = false;
+    /// 包仓库读不出来时为 false（未知）。
+    bool already_installed = false;
+    /// 合并后的白名单，编排的 TOCTOU 复检也要用同一份。
+    std::vector<std::string> allowed_publisher_thumbprints;
+
+    /// 同意页需要的全部信息；GUI 直接用它，不必自己重算。
+    ConsentRequest consent;
+    std::vector<PlannedAction> actions;
+    /// 白名单 / 仓库读取过程中的问题，由调用方写进日志或界面。
+    std::vector<std::string> warnings;
 };
 
 struct UninstallOptions {
@@ -99,6 +142,9 @@ struct CertificateReclaimDecision {
     bool policy_allows = false;
     /// f) 调用方已同意回收。
     bool consent_granted = false;
+    /// 包仓库根本读不出来（受限进程 / AppXSvc 不可用）。
+    /// 这种情况下**必须保守**：宁可留着证书，也不要在「不知道还有谁在用」时删掉它。
+    bool repository_unavailable = false;
     /// 一句话说明「为什么删 / 为什么不删」。
     std::string reason;
 };
@@ -123,6 +169,10 @@ public:
 
     InstallOutcome install(const InstallOptions& options);
     UninstallOutcome uninstall(const UninstallOptions& options);
+
+    /// 只读预演：校验容器、合并钉扎白名单、算出同意页需要的一切与动作清单。
+    /// **不创建任何文件、不写日志、不碰证书存储**（只读查询除外）。
+    InstallPlan plan(const InstallOptions& options);
 
     /// 证书回收判定：只查询，不改动系统。
     static CertificateReclaimDecision evaluate_certificate_reclaim(

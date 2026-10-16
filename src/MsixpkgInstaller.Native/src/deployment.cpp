@@ -134,6 +134,30 @@ void ensure_apartment() {
     }
 }
 
+/**
+ * 校验部署栈返回的异步操作句柄。
+ *
+ * 实测踩过（本机受限执行环境下 100% 复现）：`AddPackageByUriAsync` 会返回 **S_OK 但把
+ * 操作指针留成 null**，而 C++/WinRT 的空对象调用 `operation.Progress(...)` 会直接
+ * 触发访问违例（0xC0000005）。因为整个项目用 /EHsc，`catch (...)` 也接不住 SEH，
+ * 进程会静默死掉、连一行输出都来不及 flush —— 对安装器来说这是最糟的失败模式。
+ *
+ * 所以每个异步 API 之后都必须先验有效，再使用。
+ */
+template <typename Operation>
+Operation require_operation(Operation&& operation, const char* what) {
+    if (!operation) {
+        throw Error(
+            deployment_codes::Failed,
+            std::string(what) + " did not return a deployment operation.",
+            "The Windows deployment stack reported success but returned a null operation. "
+            "This usually means the AppX deployment service (AppXSvc) is unavailable, or the "
+            "process is too restricted to talk to it. Nothing was changed.");
+    }
+
+    return std::forward<Operation>(operation);
+}
+
 [[noreturn]] void throw_deployment_failure(uint32_t hresult, const std::string& raw) {
     const DeploymentFailure failure = describe_deployment_failure(hresult);
     std::string detail = failure.name.empty() ? std::string("HRESULT") : failure.name;
@@ -168,6 +192,16 @@ auto guard_winrt(const char* context, Function&& function) -> decltype(function(
         detail += " " + hresult_hex(hresult) + " - " + winrt::to_string(error.message());
 
         throw Error(failure.code, std::string(context) + ": " + failure.hint, detail);
+    } catch (const Error&) {
+        throw;  // 我们自己抛的稳定错误码原样向上穿。
+    } catch (const std::exception& error) {
+        throw Error(deployment_codes::Failed, std::string(context), error.what());
+    } catch (...) {
+        // 兜住任何别的东西（例如 C++/WinRT 直接抛出的裸 hresult）。
+        throw Error(
+            deployment_codes::Failed,
+            std::string(context),
+            "an unexpected non-standard exception escaped the Windows deployment APIs");
     }
 }
 
@@ -188,7 +222,8 @@ void add_one_package(
     const std::wstring display = package.filename().wstring();
     const winrt::Windows::Foundation::Uri uri(winrt::to_hstring(file_uri_from_path(package)));
 
-    auto operation = manager.AddPackageByUriAsync(uri, options);
+    const auto operation = require_operation(
+        manager.AddPackageByUriAsync(uri, options), "AddPackageByUriAsync");
 
     // 按值捕获 sink：进度回调可能在 operation 完成前一直活着。
     const DeploymentProgress sink = progress;
@@ -646,9 +681,11 @@ UninstallResult uninstall_package(const UninstallRequest& request, const Deploym
 
     report(progress, 10, L"Removing " + widen_utf8(result.full_name));
 
-    auto operation = manager.RemovePackageAsync(
-        winrt::to_hstring(result.full_name),
-        winrt::Windows::Management::Deployment::RemovalOptions::None);
+    auto operation = require_operation(
+        manager.RemovePackageAsync(
+            winrt::to_hstring(result.full_name),
+            winrt::Windows::Management::Deployment::RemovalOptions::None),
+        "RemovePackageAsync");
 
     const DeploymentProgress sink = progress;
     operation.Progress([sink](auto const&, const WinRtDeploymentProgress& state) {

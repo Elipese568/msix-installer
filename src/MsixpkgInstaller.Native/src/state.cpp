@@ -208,38 +208,46 @@ DataRoots data_roots_at(const std::filesystem::path& root, bool machine_wide) {
     return make_roots(root, machine_wide, {});
 }
 
-DataRoots resolve_data_roots() {
-    struct Candidate {
-        std::filesystem::path root;
-        bool machine_wide;
-    };
+/// 数据根目录的候选列表（顺序即优先级）。
+struct DataRootCandidate {
+    std::filesystem::path root;
+    bool machine_wide = false;
+    /// 来自 `MSIXPKG_DATA_ROOT`：显式指定，回落时不必再解释「为什么不是 ProgramData」。
+    bool explicit_override = false;
+};
 
-    std::vector<Candidate> candidates;
+std::vector<DataRootCandidate> data_root_candidates() {
+    std::vector<DataRootCandidate> candidates;
 
     // 1) 显式覆盖：测试、E2E、以及用户把数据放到别处。
     const std::wstring override_root = environment_variable(L"MSIXPKG_DATA_ROOT");
     if (!override_root.empty()) {
-        candidates.push_back({std::filesystem::path(override_root), false});
+        candidates.push_back({std::filesystem::path(override_root), false, true});
     }
 
     // 2) 机器级首选位置。
     const std::filesystem::path program_data = program_data_directory();
     if (!program_data.empty()) {
-        candidates.push_back({program_data / "Msixpkg", true});
+        candidates.push_back({program_data / "Msixpkg", true, false});
     }
 
     // 3) 用户级回落。
     const std::filesystem::path local_app_data = local_app_data_directory();
     if (!local_app_data.empty()) {
-        candidates.push_back({local_app_data / "Msixpkg", false});
+        candidates.push_back({local_app_data / "Msixpkg", false, false});
     }
 
     // 4) 最后兜底：工作区（受限执行环境里这是唯一一定可写的地方）。
     std::error_code error;
-    candidates.push_back({std::filesystem::current_path(error) / "artifacts" / "data", false});
+    candidates.push_back({std::filesystem::current_path(error) / "artifacts" / "data", false, false});
+    return candidates;
+}
+
+DataRoots resolve_data_roots() {
+    std::vector<DataRootCandidate> candidates = data_root_candidates();
 
     for (size_t index = 0; index < candidates.size(); ++index) {
-        const Candidate& candidate = candidates[index];
+        const DataRootCandidate& candidate = candidates[index];
         if (!probe_writable(candidate.root)) {
             continue;
         }
@@ -249,7 +257,7 @@ DataRoots resolve_data_roots() {
             continue;
         }
 
-        if (index > 0 && override_root.empty()) {
+        if (index > 0 && !candidates.front().explicit_override) {
             roots.warning =
                 "The preferred machine-wide data directory (%ProgramData%\\Msixpkg) was not writable; "
                 "using " + narrow_utf8(roots.root.wstring()) + " instead.";
@@ -261,6 +269,23 @@ DataRoots resolve_data_roots() {
     throw Error(
         codes::IoError,
         "No writable data directory was found. Set MSIXPKG_DATA_ROOT to a writable path.");
+}
+
+DataRoots peek_data_roots() {
+    const std::vector<DataRootCandidate> candidates = data_root_candidates();
+    if (candidates.empty()) {
+        return {};
+    }
+
+    for (const DataRootCandidate& candidate : candidates) {
+        std::error_code error;
+        if (std::filesystem::is_directory(candidate.root, error)) {
+            return make_roots(candidate.root, candidate.machine_wide, {});
+        }
+    }
+
+    // 都还没建出来：把首选位置的路径交出去供展示 —— 但**绝不创建**。
+    return make_roots(candidates.front().root, candidates.front().machine_wide, {});
 }
 
 void StateStore::ensure_directories() const {

@@ -85,3 +85,21 @@ MSIXPKG_TEST(deployment_never_leaks_winrt_exceptions_to_the_caller) {
         std::cout << "\n  uninstall_package: " << note << std::flush;
     }
 }
+
+MSIXPKG_TEST(deployment_install_rejects_a_missing_package_before_touching_winrt) {
+    // 路径不存在时必须在调用部署栈**之前**就拒绝：既不浪费一次 AppXSvc 往返，
+    // 也保证这条最常见的用法错误走稳定错误码。
+    msixpkg::InstallRequest request;
+    request.main_package = std::filesystem::path(MSIXPKG_REPO_ROOT) / "artifacts" / "native-tests" /
+                           "no-such-package.msix";
+
+    std::string note;
+    const bool leaked = leaks_foreign_exception(
+        [&request] {
+            const msixpkg::InstallResult result = msixpkg::install_packages(request);
+            (void)result;
+        },
+        note);
+    CHECK_MSG(!leaked, note);
+    CHECK_THROWS_CODE(msixpkg::install_packages(request), msixpkg::codes::FileMissing);
+}

@@ -92,6 +92,15 @@ struct DataRoots {
 /// `<当前目录>\artifacts\data`。每个候选都要通过真实写入探测才会被选中。
 DataRoots resolve_data_roots();
 
+/**
+ * 与 `resolve_data_roots()` 同样的候选顺序，但**绝不创建任何东西**：
+ * 取第一个已经存在的候选；都不存在时返回首选位置的路径（只供展示）。
+ *
+ * 存在的意义：dry-run 与 GUI 摘要页只想「看一眼」，不该因为一次预览就在
+ * `%ProgramData%` 下建目录、写日志、甚至收紧 ACL。
+ */
+DataRoots peek_data_roots();
+
 /// 显式指定根目录（测试与 E2E 用）。
 DataRoots data_roots_at(const std::filesystem::path& root, bool machine_wide = false);
 

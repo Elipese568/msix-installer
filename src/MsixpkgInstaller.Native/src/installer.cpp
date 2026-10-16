@@ -17,6 +17,7 @@
 #include "json.h"
 #include "log.h"
 #include "msixpkg/errors.h"
+#include "policy.h"
 #include "verify.h"
 
 namespace msixpkg {
@@ -415,32 +416,9 @@ CertificateReclaimDecision Installer::evaluate_certificate_reclaim(
         return decision;
     }
 
-    // 状态库里是否还有别的安装引用同一个指纹。
-    for (const InstallationRecord& other : store.find_by_certificate(record.certificate_sha1)) {
-        if (other.install_id != record.install_id) {
-            decision.other_installations_reference = true;
-            break;
-        }
-    }
-
-    // 系统里是否还有别的已注册包用这个发布者签名。
-    for (const RegisteredPackage& package : find_registered_packages()) {
-        if (equals_ignore_case_ascii(package.publisher, record.publisher_subject)) {
-            decision.other_packages_use_publisher = true;
-            break;
-        }
-    }
-
-    if (decision.other_installations_reference) {
-        decision.reason = "another installation recorded by this installer references the same certificate";
-        return decision;
-    }
-
-    if (decision.other_packages_use_publisher) {
-        decision.reason = "another registered package is signed by the same publisher";
-        return decision;
-    }
-
+    // 先做**便宜且确定**的门禁：策略与同意不需要碰系统。
+    // 顺序上放在枚举包仓库之前，既省一次 AppXSvc 往返，也让「策略不允许」这类
+    // 明确答案不会被「仓库读不出来」的保守分支掩盖掉。
     if (!policy_allows) {
         decision.reason = "the package does not ask for the certificate to be reclaimed on uninstall";
         return decision;
@@ -451,19 +429,246 @@ CertificateReclaimDecision Installer::evaluate_certificate_reclaim(
         return decision;
     }
 
+    // 状态库里是否还有别的安装引用同一个指纹（本地文件，也很便宜）。
+    for (const InstallationRecord& other : store.find_by_certificate(record.certificate_sha1)) {
+        if (other.install_id != record.install_id) {
+            decision.other_installations_reference = true;
+            break;
+        }
+    }
+
+    if (decision.other_installations_reference) {
+        decision.reason = "another installation recorded by this installer references the same certificate";
+        return decision;
+    }
+
+    // 最后才问系统：还有别的已注册包用这个发布者签名吗？
+    //
+    // 仓库读不出来时**保守处理**：判定函数必须是「全函数」——它被 uninstall、verify、repair、
+    // GUI 复用，抛异常会让「卸载」这条最需要确定性的路径半途而废。
+    // 不知道还有谁在用这张证书时，留着它永远比删掉它安全。
+    try {
+        for (const RegisteredPackage& package : find_registered_packages()) {
+            if (equals_ignore_case_ascii(package.publisher, record.publisher_subject)) {
+                decision.other_packages_use_publisher = true;
+                break;
+            }
+        }
+    } catch (const Error&) {
+        decision.repository_unavailable = true;
+    }
+
+    if (decision.repository_unavailable) {
+        decision.reason =
+            "the package repository could not be enumerated, so it is not safe to remove the certificate";
+        return decision;
+    }
+
+    if (decision.other_packages_use_publisher) {
+        decision.reason = "another registered package is signed by the same publisher";
+        return decision;
+    }
+
     decision.remove = true;
     decision.reason = "the certificate was added by this installer and nothing else needs it";
     return decision;
 }
 
+// ---------- 只读预演 ----------
+
+InstallPlan Installer::plan(const InstallOptions& options) {
+    InstallPlan plan;
+
+    if (options.container.empty()) {
+        plan.failure_code = codes::IoError;
+        plan.failure_message = "No container was supplied for installation.";
+        return plan;
+    }
+
+    plan.container_path = std::filesystem::absolute(options.container);
+
+    // ---- 钉扎白名单：管理员部署的 + 用户之前记住的 + 调用方显式给的 ----
+    //
+    // 只读预演不能建目录，所以这里用 peek_data_roots()（绝不创建任何东西）。
+    // peek 拿到的位置如果还不存在，读白名单自然什么也读不到，这是正确行为。
+    const DataRoots roots = peek_data_roots();
+    const PublisherPolicy policy = load_publisher_policy(roots);
+    plan.warnings = policy.warnings;
+
+    std::vector<std::string> pins = options.allowed_publisher_thumbprints;
+    for (const std::string& thumbprint : policy.machine_pinned) {
+        pins.push_back(thumbprint);
+    }
+
+    if (options.use_remembered_publishers) {
+        for (const std::string& thumbprint : policy.remembered) {
+            pins.push_back(thumbprint);
+        }
+    }
+
+    plan.allowed_publisher_thumbprints = pins;
+
+    // ---- 容器校验（只读） ----
+    ValidateOptions validate_options;
+    validate_options.installer_version = kInstallerVersion;
+    validate_options.host_build = host_build_number();
+    validate_options.host_architecture = host_architecture();
+    validate_options.allowed_publisher_thumbprints = pins;
+    validate_options.require_pinned_publisher = options.require_pinned_publisher;
+    validate_options.require_signature = true;
+    validate_options.validate_inner_appx = true;
+
+    const Report report = validate(plan.container_path, validate_options);
+    if (!report.valid()) {
+        const Issue& issue = report.errors.front();
+        plan.failure_code = issue.code;
+        plan.failure_message = issue.message;
+        plan.failure_detail = issue.detail;
+        return plan;
+    }
+
+    if (!report.has_manifest) {
+        plan.failure_code = codes::ManifestMissing;
+        plan.failure_message = "The container has no manifest.";
+        return plan;
+    }
+
+    plan.has_manifest = true;
+    plan.manifest = report.manifest;
+    plan.has_publisher_certificate = report.has_publisher_certificate;
+    plan.content_digest = report.content_digest_hex;
+
+    const Manifest& manifest = plan.manifest;
+    plan.package_family_name = package_family_name(manifest.identity.name, manifest.identity.publisher);
+
+    if (report.has_publisher_certificate) {
+        plan.publisher_subject = report.publisher_certificate.subject_string();
+        plan.certificate_sha1 = report.publisher_certificate.sha1_thumbprint();
+        plan.certificate_sha256 = report.publisher_certificate.sha256_thumbprint();
+    }
+
+    // ---- 钉扎判定 ----
+    plan.publisher_pinned = report.publisher_was_pinned;
+    if (plan.publisher_pinned && options.use_remembered_publishers) {
+        // 区分「管理员/显式批准」与「你自己上次同意过」：同意页的措辞不一样。
+        const std::string normalized = normalize_thumbprint(plan.certificate_sha256);
+        const bool machine_or_explicit = [&] {
+            for (const std::string& thumbprint : options.allowed_publisher_thumbprints) {
+                if (normalize_thumbprint(thumbprint) == normalized) {
+                    return true;
+                }
+            }
+
+            for (const std::string& thumbprint : policy.machine_pinned) {
+                if (thumbprint == normalized) {
+                    return true;
+                }
+            }
+
+            return false;
+        }();
+
+        plan.publisher_remembered = !machine_or_explicit;
+    }
+
+    // 证书是否已经在受信任人员存储里（只读打开，不写）。
+    if (plan.has_publisher_certificate) {
+        try {
+            plan.certificate_already_trusted = is_publisher_trusted_hex(plan.certificate_sha1);
+        } catch (const Error& error) {
+            plan.warnings.push_back("the trust store could not be read: " + error.to_string());
+        }
+    }
+
+    // 已经装过没有？仓库读不出来时按「未知」处理，不让预演失败。
+    try {
+        plan.already_installed = is_package_registered(plan.package_family_name);
+    } catch (const Error& error) {
+        plan.warnings.push_back("the package repository could not be read: " + error.to_string());
+    }
+
+    if (options.all_users && !manifest.allow_all_users) {
+        plan.failure_code = deployment_codes::AllUsersNotPermitted;
+        plan.failure_message = "The package does not allow installing for all users.";
+        plan.failure_detail = manifest.identity.name;
+        return plan;
+    }
+
+    // ---- 同意页需要的全部信息 ----
+    ConsentRequest& consent = plan.consent;
+    consent.publisher.subject = plan.publisher_subject;
+    consent.publisher.thumbprint_sha1 = plan.certificate_sha1;
+    consent.publisher.thumbprint_sha256 = plan.certificate_sha256;
+    if (report.has_publisher_certificate) {
+        consent.publisher.not_before_utc = manifest.publisher.not_before_utc;
+        consent.publisher.not_after_utc = manifest.publisher.not_after_utc;
+        consent.publisher.self_signed = manifest.publisher.self_signed;
+    }
+
+    consent.publisher.already_trusted = plan.certificate_already_trusted;
+    consent.publisher.pinned = plan.publisher_pinned;
+    consent.package.name = manifest.identity.name;
+    consent.package.publisher = manifest.identity.publisher;
+    consent.package.version = manifest.identity.version;
+    consent.package.architecture = manifest.identity.architecture;
+    consent.package.total_size = total_payload_size(manifest);
+    for (const FileRef& dependency : manifest.dependencies) {
+        consent.package.dependencies.push_back(dependency_label(dependency));
+    }
+
+    if (manifest.has_display) {
+        consent.package.description = manifest.display.description;
+    }
+
+    consent.already_installed = plan.already_installed;
+    consent.requires_elevation = !is_process_elevated();
+    consent.allow_all_users = manifest.allow_all_users;
+    consent.unpinned_publisher = plan.has_publisher_certificate && !plan.publisher_pinned;
+
+    // ---- 动作清单 ----
+    InstallRequest deploy_request;
+    deploy_request.identity_name = manifest.identity.name;
+    deploy_request.identity_publisher = manifest.identity.publisher;
+    deploy_request.identity_version = manifest.identity.version;
+    deploy_request.identity_architecture = manifest.identity.architecture;
+    deploy_request.allow_downgrade = options.allow_downgrade;
+    deploy_request.all_users = options.all_users;
+    plan.actions = plan_install(deploy_request);
+
+    plan.valid = true;
+    return plan;
+}
+
 // ---------- 安装 ----------
 
 InstallOutcome Installer::install(const InstallOptions& options) {
-    if (options.container.empty()) {
-        throw Error(codes::IoError, "No container was supplied for installation.");
+    const InstallPlan plan = this->plan(options);
+
+    InstallOutcome outcome;
+    if (!plan.valid) {
+        // 校验失败是**唯一**在动任何东西之前就要建日志的场景：否则用户拿不到
+        // 「为什么被拒」的可查记录。dry-run 成功路径一个文件都不建。
+        const DataRoots roots = resolve_data_roots();
+        Log log = Log::open(roots);
+        log.line("validation failed: " + plan.failure_code + ": " + plan.failure_message);
+        throw Error(plan.failure_code, plan.failure_message, plan.failure_detail);
     }
 
-    const std::filesystem::path container_path = std::filesystem::absolute(options.container);
+    outcome.plan = plan.actions;
+    outcome.identity_name = plan.manifest.identity.name;
+    outcome.family_name = plan.package_family_name;
+    outcome.version = plan.manifest.identity.version;
+    outcome.publisher_subject = plan.publisher_subject;
+    outcome.certificate_sha1 = plan.certificate_sha1;
+
+    if (options.dry_run) {
+        // **零副作用**：到这里为止只读过容器与注册表，没有建目录、没有写日志、
+        // 没有碰证书存储 —— 摘要页与 `--dry-run` 都靠这条性质。
+        outcome.dry_run = true;
+        return outcome;
+    }
+
+    const std::filesystem::path container_path = plan.container_path;
     DataRoots roots = resolve_data_roots();
     StateStore store(roots);
     store.ensure_directories();
@@ -471,6 +676,10 @@ InstallOutcome Installer::install(const InstallOptions& options) {
     Log log = Log::open(roots);
     if (!roots.warning.empty()) {
         log.line("warning: " + roots.warning);
+    }
+
+    for (const std::string& warning : plan.warnings) {
+        log.line("warning: " + warning);
     }
 
     // 机器级数据目录尽量收紧为 Administrators + SYSTEM；拿不到就记下来继续 ——
@@ -490,46 +699,31 @@ InstallOutcome Installer::install(const InstallOptions& options) {
     record.started_utc = utc_now();
     record.log_path = log.path_utf8();
 
-    InstallOutcome outcome;
     outcome.install_id = record.install_id;
     outcome.log_path = log.path_utf8();
     outcome.data_root = narrow_utf8(roots.root.wstring());
     outcome.warning = roots.warning;
 
+    const bool has_certificate = plan.has_publisher_certificate;
+    const bool pinned = plan.publisher_pinned;
+    const bool unpinned = has_certificate && !pinned;
+    const bool already_trusted = plan.certificate_already_trusted;
+
     std::filesystem::path staging;
     bool registered = false;
 
     try {
-        // ---- 校验（改动之前的门禁） ----
+        // ---- 校验结果已经在 plan() 里拿到，这里只补记账与日志 ----
         progress_.OnPhase(Phase::Validate, L"Validating the container");
         log.step("validate", record.container_path);
 
-        ValidateOptions validate_options;
-        validate_options.installer_version = kInstallerVersion;
-        validate_options.host_build = host_build_number();
-        validate_options.host_architecture = host_architecture();
-        validate_options.allowed_publisher_thumbprints = options.allowed_publisher_thumbprints;
-        validate_options.require_pinned_publisher = options.require_pinned_publisher;
-        validate_options.require_signature = true;
-        validate_options.validate_inner_appx = true;
-
-        const Report report = validate(container_path, validate_options);
-        if (!report.valid()) {
-            log.line("validation failed: " + first_error(report));
-            throw_report(report);
-        }
-
-        if (!report.has_manifest) {
-            throw Error(codes::ManifestMissing, "The container has no manifest.");
-        }
-
-        const Manifest& manifest = report.manifest;
-        record.content_digest = report.content_digest_hex;
+        const Manifest& manifest = plan.manifest;
+        record.content_digest = plan.content_digest;
         record.identity_name = manifest.identity.name;
         record.identity_publisher = manifest.identity.publisher;
         record.identity_version = manifest.identity.version;
         record.identity_architecture = manifest.identity.architecture;
-        record.package_family_name = package_family_name(manifest.identity.name, manifest.identity.publisher);
+        record.package_family_name = plan.package_family_name;
         record.uninstall_remove_certificate = manifest.uninstall_remove_certificate;
         record.dependencies.reserve(manifest.dependencies.size());
         record.payload_sha256.push_back(manifest.main_package.sha256);
@@ -538,35 +732,18 @@ InstallOutcome Installer::install(const InstallOptions& options) {
             record.payload_sha256.push_back(dependency.sha256);
         }
 
-        if (report.has_publisher_certificate) {
-            record.publisher_subject = report.publisher_certificate.subject_string();
-            record.certificate_sha1 = report.publisher_certificate.sha1_thumbprint();
-            record.certificate_sha256 = report.publisher_certificate.sha256_thumbprint();
+        if (has_certificate) {
+            record.publisher_subject = plan.publisher_subject;
+            record.certificate_sha1 = plan.certificate_sha1;
+            record.certificate_sha256 = plan.certificate_sha256;
             log.fingerprint("publisher", record.publisher_subject);
             log.fingerprint("certificate SHA-1", record.certificate_sha1);
             log.fingerprint("certificate SHA-256", record.certificate_sha256);
+            log.line(std::string("pinning: ") + (pinned ? (plan.publisher_remembered ? "allowed (remembered by the user on an earlier run)" : "allowed (whitelisted)")
+                                                       : "NOT pinned -> explicit consent required"));
         }
 
         log.fingerprint("content digest", record.content_digest);
-
-        outcome.identity_name = record.identity_name;
-        outcome.family_name = record.package_family_name;
-        outcome.version = record.identity_version;
-        outcome.publisher_subject = record.publisher_subject;
-        outcome.certificate_sha1 = record.certificate_sha1;
-
-        if (options.all_users && !manifest.allow_all_users) {
-            throw Error(
-                deployment_codes::AllUsersNotPermitted,
-                "The package does not allow installing for all users.",
-                record.identity_name);
-        }
-
-        // ---- 钉扎与同意 ----
-        const bool pinned = report.publisher_was_pinned;
-        const bool has_certificate = report.has_publisher_certificate;
-        const bool unpinned = has_certificate && !pinned;
-        const bool already_trusted = has_certificate && is_publisher_trusted_hex(record.certificate_sha1);
 
         InstallRequest deploy_request;
         deploy_request.identity_name = record.identity_name;
@@ -576,45 +753,8 @@ InstallOutcome Installer::install(const InstallOptions& options) {
         deploy_request.allow_downgrade = options.allow_downgrade;
         deploy_request.all_users = options.all_users;
 
-        outcome.plan = plan_install(deploy_request);
-        if (options.dry_run) {
-            outcome.dry_run = true;
-            log.line("dry-run: no changes were made");
-            return outcome;
-        }
-
-        ConsentRequest consent_request;
-        consent_request.publisher.subject = record.publisher_subject;
-        consent_request.publisher.thumbprint_sha1 = record.certificate_sha1;
-        consent_request.publisher.thumbprint_sha256 = record.certificate_sha256;
-        if (report.has_publisher_certificate) {
-            consent_request.publisher.not_before_utc = manifest.publisher.not_before_utc;
-            consent_request.publisher.not_after_utc = manifest.publisher.not_after_utc;
-            consent_request.publisher.self_signed = manifest.publisher.self_signed;
-        }
-
-        consent_request.publisher.already_trusted = already_trusted;
-        consent_request.publisher.pinned = pinned;
-        consent_request.package.name = record.identity_name;
-        consent_request.package.publisher = record.identity_publisher;
-        consent_request.package.version = record.identity_version;
-        consent_request.package.architecture = record.identity_architecture;
-        consent_request.package.total_size = total_payload_size(manifest);
-        for (const FileRef& dependency : manifest.dependencies) {
-            consent_request.package.dependencies.push_back(dependency_label(dependency));
-        }
-
-        if (manifest.has_display) {
-            consent_request.package.description = manifest.display.description;
-        }
-
-        consent_request.already_installed = is_package_registered(record.package_family_name);
-        consent_request.requires_elevation = !is_process_elevated();
-        consent_request.allow_all_users = manifest.allow_all_users;
-        consent_request.unpinned_publisher = unpinned;
-
         progress_.OnPhase(Phase::Consent, L"Waiting for user consent");
-        const ConsentDecision decision = consent_.Ask(consent_request);
+        const ConsentDecision decision = consent_.Ask(plan.consent);
         if (!decision.approved) {
             log.line("the user declined the installation");
             outcome.cancelled = true;
@@ -631,7 +771,15 @@ InstallOutcome Installer::install(const InstallOptions& options) {
         }
 
         if (unpinned) {
+            // 审计 + **真的记住**。以前这里只写日志，「将记住」是一句空话：
+            // 用户下次安装会被再问一遍，而复选框却在暗示不用再问。
             log.line("audit: the user chose to trust the unpinned publisher " + record.certificate_sha256);
+            const std::filesystem::path remembered = remembered_publishers_path(roots);
+            if (remember_publisher(roots, record.certificate_sha256, record.publisher_subject)) {
+                log.line("audit: remembered the publisher in " + narrow_utf8(remembered.wstring()));
+            } else {
+                log.line("warning: the publisher could not be remembered; the user will be asked again");
+            }
         }
 
         const bool all_users = decision.all_users && manifest.allow_all_users;
@@ -661,8 +809,17 @@ InstallOutcome Installer::install(const InstallOptions& options) {
         }
 
         // TOCTOU 复检：部署前用磁盘上的那份主包再校验一次大小与 SHA-256。
-        ValidateOptions recheck_options = validate_options;
+        // 白名单必须与 plan() 用的那份完全一致（否则这里会因为「未钉扎」而假报警）。
+        ValidateOptions recheck_options;
+        recheck_options.installer_version = kInstallerVersion;
+        recheck_options.host_build = host_build_number();
+        recheck_options.host_architecture = host_architecture();
+        recheck_options.allowed_publisher_thumbprints = plan.allowed_publisher_thumbprints;
+        recheck_options.require_pinned_publisher = options.require_pinned_publisher;
+        recheck_options.require_signature = true;
+        recheck_options.validate_inner_appx = true;
         recheck_options.extracted_main_package_path = narrow_utf8(main_package.wstring());
+
         const Report rechecked = validate(container_path, recheck_options);
         if (!rechecked.valid()) {
             log.line("post-extraction recheck failed: " + first_error(rechecked));

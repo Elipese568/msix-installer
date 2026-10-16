@@ -69,6 +69,7 @@ set(MSIXPKG_CORE_SOURCES
   src/arp.cpp
   src/installer.cpp
   src/ops.cpp
+  src/policy.cpp
 )
 
 add_library(msixpkg_core STATIC ${MSIXPKG_CORE_SOURCES})
@@ -97,6 +98,8 @@ add_executable(msixpkg_native_tests
   tests/deployment_tests.cpp
   tests/deployment_exception_tests.cpp
   tests/state_tests.cpp
+  tests/reclaim_tests.cpp
+  tests/policy_tests.cpp
 )
 target_link_libraries(msixpkg_native_tests PRIVATE msixpkg_core)
 # 白盒测试：允许直接包含内部头（json/inflate/zip 都是两端共享的格式契约，值得单独覆盖）。

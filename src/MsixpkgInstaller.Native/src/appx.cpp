@@ -184,4 +184,18 @@ std::vector<Certificate> read_appx_signer_certificates(const zip::Archive& inner
     return extract_certificates_from_appx_signature(signature);
 }
 
+std::string read_appx_main_application_id(const zip::Archive& inner) {
+    const zip::Entry* entry = inner.find(kManifestEntry);
+    if (entry == nullptr) {
+        return {};
+    }
+
+    const Bytes bytes = inner.read_to_memory(*entry, 16ull * 1024 * 1024);
+    const std::string text = strip_comments(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+
+    const std::map<std::string, std::string> application = scan_element_attributes(text, "Application");
+    const auto id = application.find("Id");
+    return id == application.end() ? std::string() : id->second;
+}
+
 }  // namespace msixpkg

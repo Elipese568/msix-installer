@@ -30,6 +30,16 @@ AppxIdentity read_appx_identity(const zip::Archive& inner);
 /// 读取内层 .msix 的 AppxSignature.p7x 并提取签名者证书。
 std::vector<Certificate> read_appx_signer_certificates(const zip::Archive& inner);
 
+/**
+ * 内层 AppxManifest 里**第一个** `Application/@Id`。
+ *
+ * 只用于「启动应用」：AUMID = `<PackageFamilyName>!<ApplicationId>`。
+ * 读不到（没有 Application 元素 / 没有 Id 属性 / XML 不完整）返回空串 ——
+ * 调用方据此禁用启动按钮，而不是把它当成安装失败。
+ * 多 Application 的包只取第一个：主入口是它，其余入口留给将来的「应用列表」。
+ */
+std::string read_appx_main_application_id(const zip::Archive& inner);
+
 /// Appx 版本归一化成四段（Appx 允许省略尾部 0）。
 std::string normalize_appx_version(std::string_view version);
 

@@ -465,6 +465,7 @@ int command_uninstall(const Arguments& arguments, bool quiet, bool json_output) 
         decision.set("existedBefore", msixpkg::json::Value::make_bool(outcome.decision.existed_before));
         decision.set("otherInstallationsReference", msixpkg::json::Value::make_bool(outcome.decision.other_installations_reference));
         decision.set("otherPackagesUsePublisher", msixpkg::json::Value::make_bool(outcome.decision.other_packages_use_publisher));
+        decision.set("repositoryUnavailable", msixpkg::json::Value::make_bool(outcome.decision.repository_unavailable));
         decision.set("policyAllows", msixpkg::json::Value::make_bool(outcome.decision.policy_allows));
         decision.set("consentGranted", msixpkg::json::Value::make_bool(outcome.decision.consent_granted));
         decision.set("reason", msixpkg::json::Value::make_string(outcome.decision.reason));
