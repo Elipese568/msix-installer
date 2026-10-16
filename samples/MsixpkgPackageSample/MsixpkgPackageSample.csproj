@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    「消费者视角」的验收样例：这个工程不 Import 仓库里的任何 targets，也不 ProjectReference
+    仓库里的任何工程 —— 它只通过 NuGet 包（本地 feed 里的 Msixpkg.Build）接入。
+
+    它存在的意义是把「包布局是否真的能被 NuGet + MSBuild 正确加载」变成可断言的：
+    产出的 .msixpkg 必须与仓库里的黄金样本逐字节相同（靠 MsixpkgCreatedUtc 固定时间戳）。
+
+    跑法（必须先打包，样例才有包可用）：
+      powershell -ExecutionPolicy Bypass -File scripts\pack-nuget.ps1
+      dotnet build samples\MsixpkgPackageSample\MsixpkgPackageSample.csproj -c Release
+    CI 里由 tests\e2e\nuget-package-e2e.ps1 在两种 MSBuild 宿主（.NET SDK 与 VS 的 .NET Framework）下各跑一次。
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- 这个工程没有源码：构建它只是为了触发打包任务（程序集本身不是交付物）。 -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- ==== Msixpkg 配置：真实应用工程里要写的属性与这里完全一样 ==== -->
+    <MsixpkgEnabled>true</MsixpkgEnabled>
+    <MsixpkgInputMsix>$(MSBuildThisFileDirectory)..\..\tests\vectors\sample-main.msix</MsixpkgInputMsix>
+    <MsixpkgCertificatePfx>$(MSBuildThisFileDirectory)..\..\tests\vectors\test-only.pfx</MsixpkgCertificatePfx>
+    <MsixpkgCertificatePassword>msixpkg-test-only</MsixpkgCertificatePassword>
+    <!-- 依赖按「包名 + 架构」匹配，所以这里放整个 vectors 目录也是安全的。 -->
+    <MsixpkgDependencyDir>$(MSBuildThisFileDirectory)..\..\tests\vectors\</MsixpkgDependencyDir>
+    <MsixpkgOutputDir>$(MSBuildThisFileDirectory)artifacts\</MsixpkgOutputDir>
+    <MsixpkgOutputFileName>Msixpkg.Sample_1.0.0.0_x64.msixpkg</MsixpkgOutputFileName>
+    <!-- 与 tests\vectors\README.md 里复现黄金容器用的参数逐字一致。 -->
+    <MsixpkgCreatedUtc>2026-01-01T00:00:00Z</MsixpkgCreatedUtc>
+    <MsixpkgDisplayName>Msixpkg Sample</MsixpkgDisplayName>
+    <MsixpkgDisplayDescription>Golden vector for the msixpkg v1 format.</MsixpkgDisplayDescription>
+    <MsixpkgDisplayHomepage>https://example.invalid/msixpkg</MsixpkgDisplayHomepage>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 版本号要与 scripts\pack-nuget.ps1 打进本地 feed 的包一致（脚本会核对）。 -->
+    <PackageReference Include="Msixpkg.Build" Version="0.1.0" />
+  </ItemGroup>
+
+</Project>

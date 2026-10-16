@@ -9,7 +9,6 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <AssemblyName>Msixpkg.Tasks</AssemblyName>
     <RootNamespace>Msixpkg.Build</RootNamespace>
-    <IsPackable>false</IsPackable>
     <!--
       关键：应用工程会用 -p:Platform=x64 构建，这个全局属性会被传播到本工程，
       于是输出路径变成 bin\x64\Release\——而 Msixpkg.Build.targets 按 bin\$(Configuration)\ 加载任务。
@@ -20,17 +19,73 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
+  <!--
+    ========== NuGet 包布局 ==========
+
+    这个包是「构建期打包工具」，采用 MSBuild 任务包的标准布局，内容只有三样：
+
+      build\Msixpkg.Build.targets                  NuGet 自动导入的挂载点
+      tasks\netstandard2.0\Msixpkg.Tasks.dll       任务程序集（宿主 MSBuild 进程内加载）
+      tasks\netstandard2.0\Msixpkg.Core.dll        Core 作为「二进制附属」随包走
+
+    Core 刻意不声明成 NuGet 依赖：任务 DLL 由 MSBuild 在自己的 load context 里加载，
+    Core.dll 必须与它同目录才能解析；如果再来一个 lib\netstandard2.0\Msixpkg.Core.dll
+    引用，就会出现同一程序集的两个来源（反而制造版本冲突）。
+    Msixpkg.Core 自己也不再 IsPackable —— 它只作为本包的二进制附属分发。
+  -->
+  <PropertyGroup Label="NuGet 包">
+    <IsPackable>true</IsPackable>
+    <PackageId>Msixpkg.Build</PackageId>
+    <Description>Build-time MSBuild task that packs a signed single-project MSIX into a .msixpkg container (idempotent, reproducible with MsixpkgCreatedUtc). Ships Msixpkg.Tasks.dll, Msixpkg.Core.dll and Msixpkg.Build.targets.</Description>
+    <PackageTags>msix;msixpkg;winui;packaging;msbuild;build;tasks</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+    <!--
+      任务包不产生 lib\：所有文件都由下面的 _MsixpkgAddPackagePayload 放到 build\ 与 tasks\。
+      IncludeBuildOutput=false 同时消掉「消费者会拿到一个 Msixpkg.Tasks 编译引用」这件事。
+    -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <!-- 构建期专用：消费方 pack 自己时不该把这个包带出去。 -->
+    <DevelopmentDependency>true</DevelopmentDependency>
+    <!--
+      NU5100：dll 不在 lib\ 下，因此不会被当成编译引用 —— 对任务包正是想要的行为。
+      NU5128：没有 lib\ 也没有依赖，TFM 与内容的常规校验会提示 —— 同样是刻意的。
+    -->
+    <NoWarn>$(NoWarn);NU5100;NU5128</NoWarn>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Build.Framework" Version="17.11.4" PrivateAssets="all" ExcludeAssets="runtime" />
     <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.11.4" PrivateAssets="all" ExcludeAssets="runtime" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Msixpkg.Core\Msixpkg.Core.csproj" />
+    <!-- PrivateAssets=all ⇒ 不会变成 NuGet 依赖，Core 只以包内 tasks\ 下的 dll 形态出现。 -->
+    <ProjectReference Include="..\Msixpkg.Core\Msixpkg.Core.csproj" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
     <None Include="Msixpkg.Build.targets" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="PACKAGE.md" Pack="true" PackagePath="\" />
+    <None Include="LICENSE" Pack="true" PackagePath="\" />
   </ItemGroup>
+
+  <!--
+    自定义包内容必须走 TfmSpecificPackageFile：IncludeBuildOutput=false 时，
+    TargetsForTfmSpecificBuildOutput 已被 NuGet 忽略，只有这个钩子在 GenerateNuspec 阶段被调用。
+    用 $(TargetPath)/$(TargetDir) 而不是 $(OutputPath)，避免打包时相对路径被解析到别处。
+  -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);_MsixpkgAddPackagePayload</TargetsForTfmSpecificContentInPackage>
+  </PropertyGroup>
+
+  <Target Name="_MsixpkgAddPackagePayload">
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="$(TargetPath)" PackagePath="tasks\netstandard2.0\" />
+      <TfmSpecificPackageFile Include="$(TargetDir)Msixpkg.Core.dll" PackagePath="tasks\netstandard2.0\" />
+      <TfmSpecificPackageFile Include="$(MSBuildProjectDirectory)\Msixpkg.Build.targets" PackagePath="build\" />
+    </ItemGroup>
+  </Target>
 
 </Project>

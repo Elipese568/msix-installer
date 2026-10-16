@@ -11,6 +11,15 @@
     <DebugType>portable</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <EnableDefaultNoneItems>true</EnableDefaultNoneItems>
+    <!--
+      包元数据的事实来源：仓库地址只在这里写一次，可打包的工程（目前只有 Msixpkg.Build）继承它。
+      Authors/PackageProjectUrl 只影响包与程序集信息，不影响构建行为。
+    -->
+    <Authors>Elipese568</Authors>
+    <RepositoryUrl>https://github.com/Elipese568/msix-installer</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/Elipese568/msix-installer</PackageProjectUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <!-- 分析器在 M1 阶段先关闭以便快速迭代，M7 再打开并按需修正（CA 规则不阻塞功能实现）。 -->
     <EnableNETAnalyzers>false</EnableNETAnalyzers>
   </PropertyGroup>

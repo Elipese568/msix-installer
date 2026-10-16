@@ -16,20 +16,23 @@
 
 ## 0. 当前状态（一句话）
 
-**M0–M7 全部完成**：托管侧（打包器 + MSBuild 任务 + 126 条测试）、
+**M0–M7 全部完成**：托管侧（打包器 + MSBuild 任务 + 132 条测试）、
 原生侧（容器读 + 校验器 + 证书存储 + 部署封装 + 状态库 + 编排 + CLI + Win32 向导，
-**50 条原生测试**，Debug/Release 双配置零警告）以及 E2E 脚本与 CI 都已就位。
+**58 条原生测试**，Debug/Release 双配置零警告）、E2E 脚本与 CI 都已就位，
+构建期打包工具也已经作为 `Msixpkg.Build` NuGet 包产出并通过消费者视角验收。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M0 | 工具链核对、工作区权限修复 | ✅ |
-| M1 | 格式规范 v1 + `Msixpkg.Core` + 黄金样本 | ✅ 126 条托管测试 |
+| M1 | 格式规范 v1 + `Msixpkg.Core` + 黄金样本 | ✅ 126 条托管测试（现 132 条） |
 | M2 | `Msixpkg.Packer` CLI + `Msixpkg.Build`（MSBuild 任务）+ 真实 WinUI3 工程 | ✅ |
 | M3 | 原生容器读 + 校验器 | ✅ 与 C# 摘要逐字节一致 |
 | M4 | `certstore` + `deployment` + `state` + `log` + `interface.h` + CLI | ✅ |
 | M5 | 引用计数 + `list/verify/repair/clean` + ARP 卸载入口 | ✅ |
 | M6 | Win32 GUI 向导 + `app.manifest` + `res/*.rc` | ✅ |
 | M7 | Windows Sandbox E2E + CI + 文档定稿 | ✅ |
+| 分发 | NSIS 安装包（`installer/nsis/`）：把向导 + CLI 装到用户机器，含快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口；另出便携 zip（`%TEMP%` 写不了的容器/沙箱用） | ✅ 46 项 E2E + PATH 逻辑 13 个 NSIS 用例；注册表效果断言需在普通机器/CI 上跑（受限环境子进程写不了 HKCU） |
+| NuGet | `Msixpkg.Build` 任务包（构建期自动产出 `.msixpkg`；Core 作为二进制附属随包） | ✅ MIT；25 项包验收（包布局 + PackageReference 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致）；发布到 nuget.org 待接 |
 
 **在本机能验证的范围内全部验证过**（详见 §5）；真实安装 / 卸载闭环在本机受限执行环境里
 跑不了 —— 见 §5 第 3 条，脚本已经写好，需要在提权环境或 Windows Sandbox 里执行。
@@ -51,6 +54,15 @@
 | 开发者模式 | 已开启 |
 | 当前进程权限 | **非管理员**；HKCU / HKLM 的**注册表写**被拒（`ERROR_ACCESS_DENIED`），
 `Windows.Management.Deployment` 的包仓库访问也被拒 |
+| 未签名的 exe | 本机装了 **360 安全套装**（`Get-MpComputerStatus` 显示 Defender 实时保护为关）。
+实测（同一段探针，父进程无论是 `pwsh` 还是计划任务，结果一致）：
+**任何未签名 exe**（NSIS 安装包、随手 `csc` 编的探针）在 `C:` 上**建不了临时文件**
+（`GetTempFileName` → 错误 5 = ACCESS_DENIED），并且**写不了注册表**（HKCU/HKLM 都 Access denied）；
+签名的 Microsoft 程序（`pwsh`/`cmd`）不受影响，`D:` 上的临时文件也不受影响。
+后果：NSIS 安装包默认双击必然弹 `Error writing temporary file`（stub 是未签名 exe，`%TEMP%` 在 C:），
+把 `TEMP/TMP` 指到工作区就能装文件，但「安装记录 / ARP / 关联 / PATH」仍在日志里报 WARNING/FAILED。
+所以断言必须由被测程序自己产生效果（见 `tests/e2e/nsis-installer-e2e.ps1` 的 `registryEffective`），
+别用「shell 能写」代替；要跑全注册表断言得给安装包加安全软件排除项或签受信任的证书。 |
 
 **环境的三个硬限制（都踩过）**：
 
@@ -69,16 +81,16 @@
 ```powershell
 cd D:\work\source\repos\MsixpkgInstaller
 
-# 托管：构建 + 测试（126 条）
+# 托管：构建 + 测试（132 条）
 dotnet build MsixpkgInstaller.slnx
 dotnet build tests\Msixpkg.Core.Tests
-tests\Msixpkg.Core.Tests\bin\Debug\net9.0\Msixpkg.Core.Tests.exe      # 期望：总计 126 成功 126
+tests\Msixpkg.Core.Tests\bin\Debug\net10.0\Msixpkg.Core.Tests.exe      # 期望：总计 132 成功 132
 
-# 原生：构建 + 测试（50 条）。必须在原生工程目录里跑，CMakePresets 在那里
+# 原生：构建 + 测试（58 条）。必须在原生工程目录里跑，CMakePresets 在那里
 cd src\MsixpkgInstaller.Native
 cmake --preset windows-x64 -S .
 cmake --build --preset windows-x64-debug
-build\x64\Debug\msixpkg_native_tests.exe                              # 期望：总计 50 成功 50
+build\x64\Debug\msixpkg_native_tests.exe                              # 期望：总计 58 成功 58
 cmake --build --preset windows-x64-release                            # /WX 已开，必须零警告
 build\x64\Release\msixpkg_native_tests.exe
 
@@ -87,7 +99,7 @@ build\x64\Debug\msixpkg-native.exe help
 
 # 打包器 CLI 自检（对黄金样本，必须逐字节复现）
 cd D:\work\source\repos\MsixpkgInstaller
-src\Msixpkg.Packer\bin\Debug\net9.0\msixpkg.exe verify tests\vectors\Msixpkg.Sample_1.0.0.0_x64.msixpkg `
+src\Msixpkg.Packer\bin\Debug\net10.0\msixpkg.exe verify tests\vectors\Msixpkg.Sample_1.0.0.0_x64.msixpkg `
   --host-arch x64 --host-build 26300 `
   --pin 9cd702035dd941aa6fe12870550ffc61633281da08839cfb0dfb3a95e1b913b9
 # 期望：result valid，digest e67cf3483677ed9d4f33b23e2c0ff7e20ca2648124dd1f248772bea13513b4fc
@@ -101,6 +113,16 @@ src\MsixpkgInstaller.Native\build\x64\Debug\msixpkg-native.exe install `
 # 端到端：负例套件（不需要管理员，几十秒）
 powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 # 期望：checks 33, failures 0
+
+# NuGet 包：打包 + 包布局 + PackageReference 消费 + 黄金样本逐字节比对（不需要管理员）
+powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
+# 期望：25 项检查全过（两个 MSBuild 宿主都产出 EA972886…A986；找不到 VS 时第二个宿主会跳过）
+
+# 分发安装包（NSIS）：构建 + 安装/卸载验收（都不需要管理员）
+powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1
+# 期望：产物 artifacts\setup\MsixpkgInstaller-0.2.0-setup.exe + .sha256（/WX 零告警）
+powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
+# 期望：checks 46, failures 0, skipped 2（本机受限环境跳过注册表断言，脚本会打印原因）
 ```
 
 真实安装 / 卸载闭环见 [`../tests/e2e/README.md`](../tests/e2e/README.md)（需要提权 + 真实签名包）。
@@ -109,7 +131,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 
 ## 3. 已经写好、**必须复用**的接口（不要重写）
 
-### 3.1 托管侧（`src/Msixpkg.Core/`，`netstandard2.0` + `net9.0`，零第三方依赖）
+### 3.1 托管侧（`src/Msixpkg.Core/`，`netstandard2.0` + `net10.0`，零第三方依赖）
 
 | 类型 | 用途 |
 |---|---|
@@ -119,6 +141,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 | `MsixpkgSigner` / `MsixpkgSignatureCodec` / `Thumbprints` | 容器签名与指纹 |
 | `MsixpkgCertificates` | **PFX 加载的唯一入口**（见坑 #5） |
 | `MsixpkgPacker` / `MsixpkgPackageBuilder` | `Pack(...)` / `Write(...)`：CLI 与 MSBuild 任务共用 |
+| `Zip.StoredZipWriter` | **容器写出的唯一入口**（只写 store）。不要退回 `System.IO.Compression.ZipArchive`，见坑 #15 |
 | `AppxPackageReader` / `Pkcs7CertificateReader` | 内层 `.msix` 的清单与签名者（含 `PKCX` 头） |
 | `MsixpkgErrorCodes` | **错误码字符串，原生侧必须逐字一致** |
 
@@ -170,8 +193,17 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 2. **GUI 剩下三处的实地验收**（已在模拟输入下验证过安全门，见 §5）：
    PROGRESS / RESULT 两页要到得了才能看，而到达它们必须真的开始安装；
    另外值得人工过一遍 150% / 200% DPI 与「取消 UAC 后回到同意页」。
-3. `Msixpkg.Build` 打成真正的 NuGet 包（目前是仓库内相对路径 `Import`；跨仓库分发才需要）。
-4. `.msixpkg` 文件关联（`HKLM\Software\Classes`）与「双击安装」体验。
+3. ~~`Msixpkg.Build` 打成真正的 NuGet 包（目前是仓库内相对路径 `Import`；跨仓库分发才需要）。~~
+   **已完成**：`src/Msixpkg.Build` 产出 `Msixpkg.Build` 包（MIT；`build\Msixpkg.Build.targets` +
+   `tasks\netstandard2.0\{Msixpkg.Tasks.dll, Msixpkg.Core.dll}`，Core 作为二进制附属随包分发，
+   不声明成 NuGet 依赖）。`Msixpkg.Core` 与 `Msixpkg.Packer` 都不再 `IsPackable`：前者随包走，
+   后者是开发机 / CI 的构建期 CLI。本地验收：`scripts\pack-nuget.ps1` +
+   `tests\e2e\nuget-package-e2e.ps1`（见 [`nuget-package.md`](nuget-package.md)）。
+   **发到 nuget.org 的流水线还没接** —— 用户明确「后面再做」。
+4. ~~`.msixpkg` 文件关联（`HKLM\Software\Classes`）与「双击安装」体验。~~
+   **已完成**：`.msixpkg` 关联（ProgID `Msixpkg.Package` → `msixpkg-installer.exe "%1"`，
+   双击停在摘要页，绝不自动安装）由分发安装包 `installer/nsis/` 负责，
+   连同快捷方式、PATH 与「设置 → 应用」条目，见 [`installer/nsis/README.md`](../installer/nsis/README.md)。
 5. `--all-users` 的完整验证（需要管理员 + 系统卷；`ProvisionPackageForAllUsersAsync` 已实现）。
 6. `ExpectedDigests`（Windows 11 23504+ / UniversalApiContract v15）作为 TOCTOU 的第二道保险；
    目前用「部署前重算 SHA-256 + 暂存目录收紧 ACL」等价覆盖。
@@ -187,10 +219,12 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 
 | 项 | 状态 |
 |---|---|
-| 托管 126 条测试 | ✅ 全绿 |
+| 托管 132 条测试 | ✅ 全绿 |
 | 原生 58 条测试（Debug / Release，`/WX`） | ✅ 全绿、零警告 |
 | 原生 CLI 对黄金样本的校验（跨语言门禁） | ✅ `--pin --require-pin --dry-run` exit 0 |
 | 负例 E2E（`tests/e2e/msixpkg-negative.ps1`） | ✅ 33 项检查全过（含「dry-run 连目录都不建」） |
+| `Msixpkg.Build` NuGet 包：包布局 / 元数据 / PackageReference 消费 / 两个 MSBuild 宿主下与黄金样本**逐字节相同** / 全部条目 store | ✅ `tests/e2e/nuget-package-e2e.ps1`：checks 25, failures 0 |
+| 包发布到 nuget.org | ⚠️ **未接**（用户决定「后面再做」；本地 feed 上的消费验收已通过） |
 | GUI：窗口起来、SUMMARY 内容正确 | ✅ 截图 + UIA 名称逐项核对 |
 | GUI：同意页的安全门 | ✅ 程序化断言：未勾「我了解并同意」→ 安装按钮禁用、信任框也禁用；未钉扎时**必须**再勾「信任此发布者」按钮才可用；取消勾选立刻回到禁用 |
 | GUI：PROGRESS / RESULT / MANAGE 的视觉 | ⚠️ MANAGE 有截图；PROGRESS / RESULT 到不了（要真装一次） |
@@ -198,6 +232,8 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 | 真实 MSIX 安装 / 卸载闭环 | ⚠️ **未在本机跑**（包仓库访问被拒；脚本已写好，需提权环境） |
 | ARP 条目真实写入 | ⚠️ **未在本机跑**（HKLM / HKCU 注册表写都被拒） |
 | 钉扎白名单（注册表）+ TOFU 记忆 | ⚠️ 注册表侧未在本机跑（写不了 HKLM）；**记忆与合并逻辑有单测**（`policy_tests.cpp`） |
+| NSIS 分发安装包：静默安装 / `/D=` / 载荷逐字节一致 / 日志 / 重复安装 / 组件开关 / `/ALLUSERS` 未提权退 5 / 不可创建目标退 4 / 两种卸载路径 / 安装记录不被删 / PATH 逻辑 13 个用例 | ✅ `tests/e2e/nsis-installer-e2e.ps1`：checks 46, failures 0（其中 7 项是 PATH 单测、4 项是便携包、3 项是免提权启动器） |
+| NSIS 分发安装包：安装记录 / ARP / `.msixpkg` 关联 / PATH 的**写入与清理** | ⚠️ 本机跑不了（受限环境不允许**子进程**写 HKCU）；套件会打印 SKIP 并改为断言「安装器如实上报了这些失败」，真实断言由 CI 的 `nsis-package` 作业在普通机器上跑 |
 
 > 这不是「没测」而是「本机测不了」：受限执行环境拒绝了注册表写与包仓库访问。
 > 代码里对这两种拒绝都有明确的上报路径（`guard_winrt` → 稳定错误码 + 可操作提示），
@@ -223,8 +259,10 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 | 10 | MSBuild 挂载点 | `GenerateAppxPackage` 目标**不存在**；真实目标是 `_GenerateAppxPackage`，产物路径是属性 `$(AppxPackageOutput)` |
 | 11 | CRC vs 哈希 | 翻转条目字节时原生侧报 `E_CONTAINER_INVALID`（ZIP CRC），C# 报 `E_HASH_MISMATCH`；**GUI 必须都当完整性失败** |
 | 12 | `Platform=x64` 会传播给被引用工程 | 用 `AppendPlatformToOutputPath=false` 修正 |
-| 13 | .NET 无 .NET 8 SDK | 托管目标用 `net9.0`；`Msixpkg.Core` 多目标 `netstandard2.0;net9.0` |
+| 13 | .NET 无 .NET 8 SDK | 托管目标用 `net10.0`；`Msixpkg.Core` 多目标 `netstandard2.0;net10.0` |
 | 14 | 托管测试运行器 | 用 xunit v3 可执行程序；`dotnet test`（VSTest）在本机不可用 |
+| 15 | **`ZipArchive` + `CompressionLevel.NoCompression` 在两个宿主上语义不同** | .NET (Core) 写 `method 0`（store），**.NET Framework 写 `method 8`**（deflate 里包 stored block，每条目 +5 字节）。于是同一个工程 `dotnet build` 与 VS 构建出的 `.msixpkg` 字节不同 —— 而规范要求写出端必须 store。容器写出必须走 `Zip.StoredZipWriter`，别退回 `ZipArchive` |
+| 16 | 新增带中文的 `.ps1` 没有 UTF-8 **BOM** | Windows PowerShell 5.1 对无 BOM 文件按 ANSI（GBK）解析，中文注释会被拆成半个字符，直接**语法错误**。新建脚本后确认前三字节是 `EF BB BF`（`write`/`edit` 工具不会保留 BOM，改动后要重新补） |
 
 ### 6.2 M4–M7 期间新踩的
 
@@ -234,6 +272,21 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
   （退出码 3、stdout 缓冲来不及 flush、零输出）。部署层所有对外函数都包在 `guard_winrt` 里。
 - `AddPackageByUriAsync` 会返回 **S_OK 但操作指针为 null**，对空对象调 `.Progress(...)`
   直接访问违例（`0xC0000005`，`/EHsc` 下 `catch(...)` 也接不住）。用 `require_operation()` 先验有效。
+
+### 6.3 分发安装包（NSIS）期间新踩的
+
+完整表（11 条，含复现手法）见 [`installer/nsis/README.md`](../installer/nsis/README.md) §5。
+最容易再犯的四条：
+
+- **`FileOpen $9 "x.log" a` 不会定位到末尾**（实测第二次写从 offset 0 覆盖）：必须
+  `FileSeek $9 0 END`，否则日志只剩最后一次运行的最后一行。
+- **NSIS 启动时就消费掉 `/D=` 并从 `$CMDLINE` 里删掉它**：判断「用户是否显式给了目录」
+  只能靠 `$INSTDIR` 是否仍等于 `InstallDir` 默认值。漏了这步，`.onInit` 会用默认目录覆盖
+  `/D=`，静默安装装到别处**还退 0**。
+- **`SetOutPath`/`File` 失败不会让安装失败**：复制后必须自己 `IfFileExists` 复查，
+  否则「什么都没装」也报成功。
+- **官方 NSIS 默认 `NSIS_MAX_STRLEN=1024`**：读长 PATH 会静默截断，写回去就是破坏用户的
+  PATH；必须用官方 `strlen_8192` 覆盖包，并在运行时按注册表报告的真实字节数再挡一次。
 
 ---
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Utilities;
 using Msixpkg.Core;
@@ -49,6 +50,12 @@ namespace Msixpkg.Build
 
         public string? DisplayHomepage { get; set; }
 
+        /// <summary>
+        /// 容器时间戳（ISO-8601，如 <c>2026-01-01T00:00:00Z</c>）。留空表示用当前时间；
+        /// 显式设置后，同一份输入在任意机器、任意时刻都产出完全相同的字节（可复现构建）。
+        /// </summary>
+        public string? CreatedUtc { get; set; }
+
         [Output]
         public ITaskItem? OutputFile { get; set; }
 
@@ -87,6 +94,27 @@ namespace Msixpkg.Build
                 return false;
             }
 
+            // 固定时间戳（可选）：这里把「解析失败」变成一条能照做的错误，
+            // 而不是让它以格式异常的形态在 Core 深处炸出来。
+            DateTimeOffset? createdUtc = null;
+            if (!string.IsNullOrEmpty(CreatedUtc))
+            {
+                if (!DateTimeOffset.TryParse(
+                        CreatedUtc,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                        out DateTimeOffset parsedCreatedUtc))
+                {
+                    Log.LogError(
+                        "Msixpkg: MsixpkgCreatedUtc is not a valid ISO-8601 timestamp: '{0}'. "
+                        + "Expected something like 2026-01-01T00:00:00Z; leave it empty to use the current time.",
+                        CreatedUtc);
+                    return false;
+                }
+
+                createdUtc = parsedCreatedUtc;
+            }
+
             string outputDirectory = OutputDirectory?.GetMetadata("FullPath") ?? string.Empty;
             if (string.IsNullOrEmpty(outputDirectory))
             {
@@ -112,6 +140,7 @@ namespace Msixpkg.Build
                 Sign = Sign,
                 IncludeCertificate = IncludeCertificate,
                 AllowAllUsers = AllowAllUsers,
+                CreatedUtc = createdUtc,
                 DisplayName = DisplayName,
                 DisplayDescription = DisplayDescription,
                 DisplayHomepage = DisplayHomepage,

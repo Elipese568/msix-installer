@@ -1,9 +1,10 @@
 name: ci
 
-# 三段互相独立的验证：
-#   managed  —— 托管库 + 打包器 + 126 条 xunit v3 测试（注意：不是 dotnet test）
-#   native   —— C++ 原生核心/安装器（Release + /WX）+ 50 条原生测试
-#   e2e      —— 容器校验、计划、失败上报的负例套件（不需要管理员，也不需要真实安装）
+# 四段互相独立的验证：
+#   managed       —— 托管库 + 打包器 + 132 条 xunit v3 测试（注意：不是 dotnet test）
+#   nuget-package —— Msixpkg.Build 的 NuGet 包：包布局 + PackageReference 消费 + 黄金样本逐字节比对
+#   native        —— C++ 原生核心/安装器（Release + /WX）+ 58 条原生测试
+#   e2e           —— 容器校验、计划、失败上报的负例套件（不需要管理员，也不需要真实安装）
 #
 # 真实安装/卸载的闭环不在这里跑：它需要管理员、需要 AppXSvc，而且会真的改动运行器
 # 的证书存储与包仓库。那部分由 tests/e2e/msixpkg-e2e.ps1 在专用机器或
@@ -21,16 +22,16 @@ env:
 
 jobs:
   managed:
-    name: managed (net9.0 + packer)
+    name: managed (net10.0 + packer)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-dotnet@v4
         with:
-          # 仓库里没有 .NET 8；Msixpkg.Core 多目标 netstandard2.0;net9.0，
-          # Msixpkg.Build 要能进 MSBuild 的 .NET Framework 宿主。
-          dotnet-version: '9.0.x'
+          # 托管目标框架：Msixpkg.Core 多目标 netstandard2.0;net10.0，Msixpkg.Build（NuGet 任务包）
+          # 必须能进 MSBuild 的 .NET Framework 宿主，测试与 CLI 用 net10.0（LTS）。
+          dotnet-version: '10.0.x'
 
       - name: build
         run: dotnet build MsixpkgInstaller.slnx -c Release --nologo
@@ -41,7 +42,34 @@ jobs:
       - name: run managed tests
         # xunit v3 产出的是普通可执行程序：本机的 VSTest testhost 需要打开父进程句柄，
         # 在受限环境里会被拒绝（Win32Exception(5)），所以全仓库统一不用 dotnet test。
-        run: tests\Msixpkg.Core.Tests\bin\Release\net9.0\Msixpkg.Core.Tests.exe
+        run: tests\Msixpkg.Core.Tests\bin\Release\net10.0\Msixpkg.Core.Tests.exe
+
+  nuget-package:
+    name: nuget package (pack + PackageReference acceptance)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: pack Msixpkg.Build and accept it
+        # 这一段同时覆盖两个宿主：.NET SDK 的 MSBuild 与 Visual Studio 的 .NET Framework MSBuild
+        # （-RequireVsMsBuild：托管运行器上有 VS，找不到就该红，而不是静默跳过）。
+        # 判定标准是产出的 .msixpkg 与 tests\vectors 里的黄金样本逐字节相同，且每个条目都是 store。
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File tests\e2e\nuget-package-e2e.ps1 -RequireVsMsBuild
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nuget-package
+          path: |
+            artifacts/nuget/*.nupkg
+            samples/MsixpkgPackageSample/artifacts/*.msixpkg
+          if-no-files-found: warn
 
   native:
     name: native (MSVC + C++/WinRT)
@@ -103,3 +131,45 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass
           -File tests\e2e\msixpkg-negative.ps1
           -ExePath build\ci-native\Debug\msixpkg-native.exe
+
+  nsis-package:
+    name: nsis distribution package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure
+        run: >
+          cmake -S src/MsixpkgInstaller.Native -B build/ci-native
+          -G "Visual Studio 17 2022" -A x64
+          -DMSIXPKG_WARNINGS_AS_ERRORS=ON
+
+      - name: build payload (Release)
+        run: cmake --build build/ci-native --config Release --parallel
+
+      - name: build the setup exe
+        # 脚本按需下载官方 NSIS 3.10 两个包（校验 SHA-256）并叠加成 strlen_8192 工具链；
+        # 载荷目录与本地 preset 不同，所以用 -PayloadDir 指过去。
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File scripts\build-nsis-installer.ps1
+          -PayloadDir build\ci-native\Release
+          -OutputDir artifacts\setup
+
+      - name: install / uninstall E2E
+        # 这一段是「真实机器」的验证：托管运行器允许子进程写 HKCU，所以安装记录、
+        # ARP 条目、.msixpkg 关联与 PATH 的写入/清理断言都会真的执行
+        #（本机受限环境里这一段会打印 SKIP，见 installer/nsis/README.md §6）。
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File tests\e2e\nsis-installer-e2e.ps1
+          -PayloadDir build\ci-native\Release
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nsis-setup
+          path: |
+            artifacts/setup/*.exe
+            artifacts/setup/*.sha256
+          if-no-files-found: warn

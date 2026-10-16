@@ -3,18 +3,22 @@
   <PropertyGroup>
     <!--
       netstandard2.0：给 MSBuild 的 .NET Framework 宿主进程内加载（打包任务）。
-      net9.0：给 CLI 与测试用，以便使用 X509CertificateLoader 等新 API。
+      net10.0：给 CLI 与测试用，以便使用 X509CertificateLoader 等新 API
+      （net9.0 是 STS，2026-05 已停止支持，不再作为目标框架）。
       刻意保持零第三方依赖 —— MSBuild 进程内加载对绑定重定向极其敏感。
     -->
-    <TargetFrameworks>netstandard2.0;net9.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;net10.0</TargetFrameworks>
     <AssemblyName>Msixpkg.Core</AssemblyName>
     <RootNamespace>Msixpkg.Core</RootNamespace>
-    <IsPackable>true</IsPackable>
-    <PackageId>Msixpkg.Core</PackageId>
+    <!--
+      不发布 NuGet 包：Core 只作为「二进制附属」随 Msixpkg.Build 包内的 tasks\netstandard2.0\ 分发。
+      单独发布会制造同一程序集的两个来源（任务 DLL 在自己的 load context 里必须挨着 Core.dll 才能解析）。
+    -->
+    <IsPackable>false</IsPackable>
     <Description>.msixpkg container format: read, write, sign and validate.</Description>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0'">
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
     <!--
       SYSLIB0057 提示改用 X509CertificateLoader。我们确实在能用的地方用了它（见 Packing/MsixpkgCertificates.cs），
       但两处场景没有等价替代：

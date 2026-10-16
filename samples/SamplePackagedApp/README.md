@@ -48,10 +48,10 @@ artifacts\msix\SamplePackagedApp_1.0.0.0_x64_Test\SamplePackagedApp_1.0.0.0_x64.
 
 ```powershell
 # 取证书指纹
-src\Msixpkg.Packer\bin\Debug\net9.0\msixpkg.exe export-cert --pfx certs\App.Dev.pfx --password msixpkg-dev --output artifacts\smoke\appdev.cer
+src\Msixpkg.Packer\bin\Debug\net10.0\msixpkg.exe export-cert --pfx certs\App.Dev.pfx --password msixpkg-dev --output artifacts\smoke\appdev.cer
 
 # 校验容器（--pin 用上一步输出/日志里的 MsixpkgPublisherThumbprint）
-src\Msixpkg.Packer\bin\Debug\net9.0\msixpkg.exe verify artifacts\msix\SamplePackagedApp_1.0.0.0_x64.msixpkg `
+src\Msixpkg.Packer\bin\Debug\net10.0\msixpkg.exe verify artifacts\msix\SamplePackagedApp_1.0.0.0_x64.msixpkg `
   --host-arch x64 --host-build 26300 --pin <thumbprint>
 ```
 
@@ -60,6 +60,21 @@ src\Msixpkg.Packer\bin\Debug\net9.0\msixpkg.exe verify artifacts\msix\SamplePack
 - `APPX0105 / APPX0107`：MSIX 工具链导入 PFX 时的告警。**实测非致命** —— 最终 `.msix` 仍带
   `AppxSignature.p7x`。把证书导入 `Cert:\CurrentUser\My` 可消除。
 - `IL2104`（trim 告警）、`mspdbcmf.exe 未找到`（不生成符号包）：与本链路无关。
+
+## 接入方式说明
+
+本工程走的是**仓库内相对路径**（`ProjectReference` + `Import` `Msixpkg.Build.targets`），
+好处是离线可构建、且改任务代码立刻生效。真实项目/跨仓库分发请改用 NuGet 包：
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Msixpkg.Build" Version="0.1.0" />
+</ItemGroup>
+```
+
+包会自动导入 `build\Msixpkg.Build.targets`，不需要 `Import`。两种方式的验收都在
+[`tests\e2e\nuget-package-e2e.ps1`](../../tests/e2e/nuget-package-e2e.ps1)（只用包的消费者视角）与
+[`docs\nuget-package.md`](../../docs/nuget-package.md) 里。
 
 ## 本工程刻意不加入解决方案
 

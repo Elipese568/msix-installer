@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.IO.Compression;
 using System.Security.Cryptography.X509Certificates;
+using Msixpkg.Core.Zip;
 
 namespace Msixpkg.Core
 {
@@ -33,12 +33,11 @@ namespace Msixpkg.Core
     /// <summary>把「已签名的 .msix + 依赖 + 发布者证书」组装成 .msixpkg。</summary>
     public sealed class MsixpkgPackageBuilder
     {
-        /// <summary>
-        /// v1 规定写出必须使用 store（不压缩）：容器字节完全可复现，
-        /// 黄金样本因此可以逐字节比对，跨语言一致性测试才有意义。
-        /// 读取端仍然必须支持 deflate。
-        /// </summary>
-        private const CompressionLevel StoreLevel = CompressionLevel.NoCompression;
+        // 写出统一交给 Msixpkg.Core.Zip.StoredZipWriter：v1 规定写出必须使用 store（不压缩），
+        // 容器字节才完全可复现、黄金样本才能逐字节比对，跨语言一致性测试才有意义。
+        // （不要退回 System.IO.Compression.ZipArchive：.NET Framework 宿主会用 deflate 写
+        //   CompressionLevel.NoCompression，同一个工程在 VS 与 dotnet build 下产出不同字节。）
+        // 读取端仍然必须支持 deflate —— 第三方容器可能压过。
 
         private readonly List<DependencyInput> _dependencies = new List<DependencyInput>();
         private readonly MsixpkgIdentity _identity;
@@ -161,7 +160,7 @@ namespace Msixpkg.Core
             try
             {
                 using (var file = new FileStream(temporaryPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
-                using (var archive = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false))
+                using (var archive = new StoredZipWriter(file, leaveOpen: false))
                 {
                     var timestamp = new DateTimeOffset(DateTime.ParseExact(
                         manifest.CreatedUtc,
@@ -171,18 +170,18 @@ namespace Msixpkg.Core
 
                     // 1) msixpkg.json 必须是第一个条目（规范要求，读者可流式取清单）。
                     byte[] manifestBytes = System.Text.Encoding.UTF8.GetBytes(manifest.ToJson());
-                    WriteBytesEntry(archive, MsixpkgPaths.ManifestEntry, manifestBytes, StoreLevel, timestamp);
+                    archive.AddBytes(MsixpkgPaths.ManifestEntry, manifestBytes, timestamp);
                     digestEntries.Add(new MsixpkgContentDigestEntry(MsixpkgPaths.ManifestEntry, Sha256Util.HashBytesHex(manifestBytes)));
 
                     // 2) 主包
-                    WriteFileEntry(archive, manifest.MainPackage.Path, _mainPackage!.FilePath, manifest.MainPackage, StoreLevel, timestamp);
+                    AddFileEntry(archive, manifest.MainPackage.Path, _mainPackage!.FilePath, manifest.MainPackage, timestamp);
                     digestEntries.Add(new MsixpkgContentDigestEntry(manifest.MainPackage.Path, manifest.MainPackage.Sha256));
 
                     // 3) 依赖包
                     for (int i = 0; i < manifest.Dependencies.Count; i++)
                     {
                         MsixpkgFileRef dependencyRef = manifest.Dependencies[i];
-                        WriteFileEntry(archive, dependencyRef.Path, _dependencies[i].FilePath, dependencyRef, StoreLevel, timestamp);
+                        AddFileEntry(archive, dependencyRef.Path, _dependencies[i].FilePath, dependencyRef, timestamp);
                         digestEntries.Add(new MsixpkgContentDigestEntry(dependencyRef.Path, dependencyRef.Sha256));
                     }
 
@@ -190,7 +189,7 @@ namespace Msixpkg.Core
                     if (manifest.Publisher != null)
                     {
                         byte[] der = signer.Export(X509ContentType.Cert);
-                        WriteBytesEntry(archive, MsixpkgPaths.PublisherCertificateEntry, der, StoreLevel, timestamp);
+                        archive.AddBytes(MsixpkgPaths.PublisherCertificateEntry, der, timestamp);
                         digestEntries.Add(new MsixpkgContentDigestEntry(MsixpkgPaths.PublisherCertificateEntry, Sha256Util.HashBytesHex(der)));
                     }
 
@@ -200,7 +199,7 @@ namespace Msixpkg.Core
                         byte[] digest = MsixpkgContentDigest.Compute(digestEntries);
                         MsixpkgSignature signature = MsixpkgSigner.Sign(digest, signer, options.AllowNonDeterministicSignature);
                         byte[] signatureBytes = System.Text.Encoding.UTF8.GetBytes(MsixpkgSignatureCodec.Write(signature));
-                        WriteBytesEntry(archive, MsixpkgPaths.SignatureEntry, signatureBytes, StoreLevel, timestamp);
+                        archive.AddBytes(MsixpkgPaths.SignatureEntry, signatureBytes, timestamp);
                     }
                 }
 
@@ -220,58 +219,34 @@ namespace Msixpkg.Core
             return manifest;
         }
 
-        private static void WriteBytesEntry(ZipArchive archive, string name, byte[] content, CompressionLevel level, DateTimeOffset timestamp)
-        {
-            ZipArchiveEntry entry = archive.CreateEntry(name, level);
-            entry.LastWriteTime = timestamp;
-            using Stream stream = entry.Open();
-            stream.Write(content, 0, content.Length);
-        }
-
-        private static void WriteFileEntry(
-            ZipArchive archive,
+        /// <summary>
+        /// 流式写入一个文件条目，并在**写出的同一次读取里**复算哈希与大小：
+        /// 输入文件若在打包过程中被替换（TOCTOU），这里会直接失败，而不是产出一个自相矛盾的容器。
+        /// </summary>
+        private static void AddFileEntry(
+            StoredZipWriter archive,
             string entryName,
             string sourcePath,
             MsixpkgFileRef expected,
-            CompressionLevel level,
             DateTimeOffset timestamp)
         {
-            ZipArchiveEntry entry = archive.CreateEntry(entryName, level);
-            entry.LastWriteTime = timestamp;
+            ZipEntryInfo written = archive.AddFile(entryName, sourcePath, timestamp);
 
-            using var sha = System.Security.Cryptography.SHA256.Create();
-            using (var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            using (Stream destination = entry.Open())
+            // 第二遍校验：防止输入文件在被读取期间被替换。
+            if (!string.Equals(written.Sha256Hex, expected.Sha256, StringComparison.Ordinal))
             {
-                var buffer = new byte[1024 * 128];
-                long copied = 0L;
-                int read;
-                while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
-                {
-                    sha.TransformBlock(buffer, 0, read, null, 0);
-                    destination.Write(buffer, 0, read);
-                    copied += read;
-                }
+                throw new MsixpkgFormatException(
+                    MsixpkgErrorCodes.HashMismatch,
+                    "The input file changed while packaging.",
+                    entryName);
+            }
 
-                sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-
-                // 第二遍校验：防止输入文件在被读取期间被替换。
-                string actual = Sha256Util.ToLowerHex(sha.Hash!);
-                if (!string.Equals(actual, expected.Sha256, StringComparison.Ordinal))
-                {
-                    throw new MsixpkgFormatException(
-                        MsixpkgErrorCodes.HashMismatch,
-                        "The input file changed while packaging.",
-                        entryName);
-                }
-
-                if (copied != expected.Size)
-                {
-                    throw new MsixpkgFormatException(
-                        MsixpkgErrorCodes.SizeMismatch,
-                        "The input file size changed while packaging.",
-                        entryName);
-                }
+            if (written.Size != expected.Size)
+            {
+                throw new MsixpkgFormatException(
+                    MsixpkgErrorCodes.SizeMismatch,
+                    "The input file size changed while packaging.",
+                    entryName);
             }
         }
 

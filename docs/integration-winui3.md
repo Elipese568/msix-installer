@@ -79,6 +79,20 @@ Windows 的证书集合导入路径（`X509Certificate2Collection.Import`）对�
 
 ## 3. 接入 Msixpkg.Build
 
+**A) NuGet 包（推荐；跨仓库分发给别人时唯一合理的方式）**
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Msixpkg.Build" Version="0.1.0" />
+</ItemGroup>
+```
+
+包内的 `build\Msixpkg.Build.targets` 由 NuGet 自动导入，**不需要**写 `Import`；
+`Msixpkg.Core.dll` 作为二进制附属随包内的 `tasks\netstandard2.0\` 走，所以**不要**引用 `Msixpkg.Core`
+（它不再发布成包）。包的布局、可复现构建与排错见 [`nuget-package.md`](nuget-package.md)。
+
+**B) 仓库内相对路径（本仓库的样例与 CI 走这条，离线可用）**
+
 ```xml
 <ItemGroup>
   <!--
@@ -120,6 +134,7 @@ Windows 的证书集合导入路径（`X509Certificate2Collection.Import`）对�
 | `MsixpkgIncludeCertificate` | `true` | 是否内嵌发布者证书（公网受信证书设为 false） |
 | `MsixpkgAllowAllUsers` | `true` | 是否允许安装器使用 `--all-users` |
 | `MsixpkgSign` | `true` | 是否给容器签名 |
+| `MsixpkgCreatedUtc` | 空（当前时间） | 固定容器时间戳（ISO-8601，如 `2026-01-01T00:00:00Z`）⇒ 逐字节可复现的构建；格式非法会明确报错 |
 | `MsixpkgDisplayName/Description/Homepage` | 空 | 供安装器 GUI 展示 |
 
 任务输出项：`MsixpkgOutputFile`、`MsixpkgCertificateFile`、`MsixpkgPublisherThumbprint`、`MsixpkgPackageIdentity`。
@@ -167,7 +182,7 @@ artifacts\msix\SamplePackagedApp_1.0.0.0_x64.msixpkg                            
 自检：
 
 ```powershell
-src\Msixpkg.Packer\bin\Debug\net9.0\msixpkg.exe verify artifacts\msix\<Name>.msixpkg `
+src\Msixpkg.Packer\bin\Debug\net10.0\msixpkg.exe verify artifacts\msix\<Name>.msixpkg `
   --host-arch x64 --host-build 26300 --pin <MsixpkgPublisherThumbprint>
 ```
 

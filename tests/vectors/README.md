@@ -39,7 +39,7 @@ e67cf3483677ed9d4f33b23e2c0ff7e20ca2648124dd1f248772bea13513b4fc
 打包器 CLI 可以用固定时间戳复现出完全相同的字节：
 
 ```powershell
-src\Msixpkg.Packer\bin\Debug\net9.0\msixpkg.exe pack `
+src\Msixpkg.Packer\bin\Debug\net10.0\msixpkg.exe pack `
   --msix tests\vectors\sample-main.msix --pfx tests\vectors\test-only.pfx --password msixpkg-test-only `
   --dependencies tests\vectors --output artifacts\smoke\reproduced.msixpkg `
   --created-utc 2026-01-01T00:00:00Z `
@@ -54,7 +54,7 @@ src\Msixpkg.Packer\bin\Debug\net9.0\msixpkg.exe pack `
 
 ```powershell
 $env:MSIXPKG_GENERATE_VECTORS = '1'
-tests\Msixpkg.Core.Tests\bin\Debug\net9.0\Msixpkg.Core.Tests.exe
+tests\Msixpkg.Core.Tests\bin\Debug\net10.0\Msixpkg.Core.Tests.exe
 ```
 
 生成规则：
@@ -85,3 +85,8 @@ tests\Msixpkg.Core.Tests\bin\Debug\net9.0\Msixpkg.Core.Tests.exe
 - `.gitattributes` 已把 `*.msixpkg` / `*.msix` / `*.pfx` 标记为 binary，禁止行尾转换与文本 diff。
 - 黄金容器使用 `store`（不压缩）写出，条目时间戳固定为 `createdUtc` 的日期，
   所以同一份输入在任意机器、任意 .NET 版本上都应产出完全相同的字节。
+  写出实现在 `src/Msixpkg.Core/Zip/StoredZipWriter.cs`（自己写本地头 / 中央目录 / CRC-32）。
+  **不要**退回 `System.IO.Compression.ZipArchive`：`CompressionLevel.NoCompression` 在两个宿主上语义不同 ——
+  .NET (Core) 写 `store`（method 0），.NET Framework 写 `deflate`（method 8，每个条目多 5 字节），
+  于是同一个工程用 `dotnet build` 与 Visual Studio 构建出的容器字节不同（见 `docs/handoff.md` 坑 #15）。
+  `ZipWriterTests` 会断言写出端只产生 method 0。

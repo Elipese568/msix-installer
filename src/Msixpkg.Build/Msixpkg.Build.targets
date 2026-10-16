@@ -3,13 +3,16 @@
   <!--
     Msixpkg.Build.targets —— 把已签名的 .msix 自动打包成 .msixpkg。
 
-    接入方式（应用工程 .csproj）：
-      Import 本文件（仓库内相对路径，或打包成 NuGet 后用 PackageReference）；
+    接入方式（应用工程 .csproj）二选一：
+      1) NuGet 包（推荐）：<PackageReference Include="Msixpkg.Build" Version="…" />，
+         包内的 build\Msixpkg.Build.targets 由 NuGet 自动导入，不用写 Import；
+      2) 仓库内：用相对路径 Import 本文件（本仓库自己的样例与 CI 走这条）。
       然后在 PropertyGroup 里设置：
         MsixpkgEnabled            = true      （默认 false，必须显式打开）
         PackageCertificateKeyFile = certs\App.Dev.pfx
         MsixpkgCertificatePassword= 由环境变量注入，绝不入库
         MsixpkgDependencyDir      = $(AppxPackageDir)Dependencies\
+        MsixpkgCreatedUtc         = 2026-01-01T00:00:00Z（可选：固定时间戳 ⇒ 逐字节可复现）
 
     挂载点说明：
       - 单项目 MSIX（Windows App SDK）在 GenerateAppxPackage 里产出 .msix；
@@ -37,6 +40,11 @@
     <MsixpkgCertificatePfx Condition="'$(MsixpkgCertificatePfx)' == ''">$(PackageCertificateKeyFile)</MsixpkgCertificatePfx>
     <MsixpkgIncludeCertificate Condition="'$(MsixpkgIncludeCertificate)' == ''">true</MsixpkgIncludeCertificate>
     <MsixpkgAllowAllUsers Condition="'$(MsixpkgAllowAllUsers)' == ''">true</MsixpkgAllowAllUsers>
+    <!--
+      MsixpkgCreatedUtc 没有默认值：留空就是「用当前时间」，容器每次构建都不同（正常发布流程）。
+      设成固定 ISO-8601 时间戳（如 2026-01-01T00:00:00Z）就得到逐字节可复现的构建 ——
+      CI 的「包产出的容器 == 仓库里的黄金样本」那条断言靠的就是它。
+    -->
   </PropertyGroup>
 
   <UsingTask TaskName="Msixpkg.Build.PackTask" AssemblyFile="$(MsixpkgTasksAssembly)" />
@@ -84,6 +92,7 @@
               Sign="$(MsixpkgSign)"
               IncludeCertificate="$(MsixpkgIncludeCertificate)"
               AllowAllUsers="$(MsixpkgAllowAllUsers)"
+              CreatedUtc="$(MsixpkgCreatedUtc)"
               DisplayName="$(MsixpkgDisplayName)"
               DisplayDescription="$(MsixpkgDisplayDescription)"
               DisplayHomepage="$(MsixpkgDisplayHomepage)">

@@ -68,7 +68,7 @@ $ErrorActionPreference = 'Continue'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $nativeExe = Join-Path $repoRoot "src\MsixpkgInstaller.Native\build\x64\$Configuration\msixpkg-native.exe"
-$packerExe = Join-Path $repoRoot 'src\Msixpkg.Packer\bin\Debug\net9.0\msixpkg.exe'
+$packerExe = Join-Path $repoRoot 'src\Msixpkg.Packer\bin\Debug\net10.0\msixpkg.exe'
 $work = if ($WorkDirectory) { $WorkDirectory } else { Join-Path $repoRoot 'artifacts\e2e-full' }
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
