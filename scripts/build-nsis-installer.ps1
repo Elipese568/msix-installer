@@ -79,6 +79,31 @@ if (-not $OutputDir) {
     $OutputDir = Join-Path $repoRoot 'artifacts\setup'
 }
 
+# ---------------------------------------------------------------------------
+# 0) 入参绝对化
+# ---------------------------------------------------------------------------
+# makensis 解析 File / OutFile 时相对的是**脚本所在目录**（installer\nsis\），不是当前工作目录。
+# 于是 -PayloadDir / -OutputDir 只要传相对路径就会变成
+#   File: "build\ci-native\Release\msixpkg-installer.exe" -> no files found.
+# （本机默认路径恰好是绝对路径，所以这个坑只在 CI 里传相对路径时才暴露。）
+function ConvertTo-AbsolutePath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrEmpty($Path)) {
+        return $Path
+    }
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
+}
+
+if ($PayloadDir) { $PayloadDir = ConvertTo-AbsolutePath $PayloadDir }
+if ($OutputDir) { $OutputDir = ConvertTo-AbsolutePath $OutputDir }
+if ($NsisDir) { $NsisDir = ConvertTo-AbsolutePath $NsisDir }
+
 # 官方 NSIS 3.10 的两个包（来源：sourceforge.net/projects/nsis/files/NSIS%203/3.10/）。
 # 哈希取自该目录的文件清单；下载后必须逐字节对上，防止镜像被替换或半截下载。
 $nsisMainUrl = 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip'

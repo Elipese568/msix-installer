@@ -264,6 +264,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | 15 | **`ZipArchive` + `CompressionLevel.NoCompression` 在两个宿主上语义不同** | .NET (Core) 写 `method 0`（store），**.NET Framework 写 `method 8`**（deflate 里包 stored block，每条目 +5 字节）。于是同一个工程 `dotnet build` 与 VS 构建出的 `.msixpkg` 字节不同 —— 而规范要求写出端必须 store。容器写出必须走 `Zip.StoredZipWriter`，别退回 `ZipArchive` |
 | 16 | 新增带中文的 `.ps1` 没有 UTF-8 **BOM** | Windows PowerShell 5.1 对无 BOM 文件按 ANSI（GBK）解析，中文注释会被拆成半个字符，直接**语法错误**。新建脚本后确认前三字节是 `EF BB BF`（`write`/`edit` 工具不会保留 BOM，改动后要重新补） |
 | 17 | CI 里写死 CMake 生成器 `-G "Visual Studio 17 2022"` | 托管运行器会换镜像：`windows-latest` 自 2026-06 起是 Windows Server 2025 + **VS 2026**，写死的名字直接 `could not find any instance of Visual Studio`。用 `scripts\detect-vs-generator.ps1`（vswhere 探测主版本 → 生成器名，写进 `$GITHUB_ENV`），三个原生作业共用 |
+| 18 | makensis 解析 `File` / `OutFile` 相对的是**脚本所在目录**，不是当前工作目录 | `scripts\build-nsis-installer.ps1` 的 `-PayloadDir` / `-OutputDir` 传相对路径 → `File: "build\ci-native\Release\msixpkg-installer.exe" -> no files found.`，`OutFile` 也会写错地方。本机默认路径恰好是绝对的，所以只在 CI 暴露；脚本现在先把路径入参绝对化 |
 
 ### 6.2 M4–M7 期间新踩的
 
