@@ -29,7 +29,7 @@
 | M7 | E2E（负例套件 + 完整闭环 + Windows Sandbox）+ CI + 文档定稿 | ✅ 完成 |
 | 分发 | NSIS 安装包：把向导与 CLI 装到用户机器上（快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口） | ✅ 完成（E2E 46 项 + PATH 逻辑 13 个 NSIS 用例；本机受限环境里跳过的注册表断言由 CI 覆盖，见 [`installer/nsis/README.md`](installer/nsis/README.md)） |
 
-| NuGet | `Msixpkg.Build`：构建期自动产出 `.msixpkg` 的 MSBuild 任务包（MIT；包内 `tasks\` 带 `Msixpkg.Core.dll`） | ✅ 完成（包验收 25 项：布局 + `PackageReference` 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致；发布流水线已接，用 nuget.org Trusted Publishing/OIDC，见 [`docs/nuget-package.md`](docs/nuget-package.md)） |
+| NuGet | `Msixpkg.Build`：构建期自动产出 `.msixpkg` 的 MSBuild 任务包（MIT；包内 `tasks\` 带 `Msixpkg.Core.dll`） | ✅ 完成并**已发布 `0.1.0`**（<https://www.nuget.org/packages/Msixpkg.Build/0.1.0>）；包验收 25 项：布局 + `PackageReference` 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致；发布走 nuget.org Trusted Publishing/OIDC，见 [`docs/nuget-package.md`](docs/nuget-package.md) |
 
 原生侧测试 **58 条**、托管侧 **132 条**，Debug 与 Release 双配置均绿，Release 开 `/WX`（零警告）；
 负例 E2E 33 项检查全过（`tests/e2e/msixpkg-negative.ps1`，不需要管理员）。
@@ -147,8 +147,9 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1   # 25 
 
 发布由 CI 负责（[`.github/workflows/nuget-publish.yml`](.github/workflows/nuget-publish.yml)）：
 `git tag v0.2.0 && git push origin v0.2.0`，或在 Actions 里手动 Run workflow 填版本号。
-用 nuget.org 的 **Trusted Publishing（OIDC）**，仓库里不存长期密钥；需要先在 nuget.org 建一条指向
-本仓库 / `nuget-publish.yml` 的信任策略，并加一个仓库 Secret `NUGET_USER`。
+用 nuget.org 的 **Trusted Publishing（OIDC）**，仓库里不存长期密钥（信任策略与 `NUGET_USER`
+Secret 都已配好）。**已发布：`Msixpkg.Build 0.1.0`** ——
+<https://www.nuget.org/packages/Msixpkg.Build/0.1.0>。
 
 细节（包布局、可复现构建、发布准备、排错）见
 [`docs/nuget-package.md`](docs/nuget-package.md)。

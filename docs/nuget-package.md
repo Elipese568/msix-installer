@@ -87,6 +87,10 @@ NuGet 那条流水线（[`nuget-publish.yml`](../.github/workflows/nuget-publish
 
 ## 5. 版本与发布（CI 负责构建与发布）
 
+**已发布版本：`0.1.0`** — <https://www.nuget.org/packages/Msixpkg.Build/0.1.0>
+（由 tag `v0.1.0` 触发，[发布记录](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）。
+包 ID + 版本一旦发布不可覆盖，所以后续每次改动都要换版本号。
+
 版本号的事实来源是 `Directory.Build.props` 的 `0.1.0`；发布时由工作流覆盖
 （`scripts\pack-nuget.ps1 -Version <版本>`）。样例工程里钉的版本要同步改。
 
@@ -100,7 +104,7 @@ NuGet 那条流水线（[`nuget-publish.yml`](../.github/workflows/nuget-publish
 
 `dry_run=true` 时只构建并把 `.nupkg` 作为 artifact 传上来，不碰 nuget.org。
 
-### 5.1 一次性准备（只有仓库 owner 能做）
+### 5.1 一次性准备（**已配置完成**，换仓库/换账号时才需要重做）
 
 1. **nuget.org** → 用户名菜单 → **Trusted Publishing** → Add a new policy：
 

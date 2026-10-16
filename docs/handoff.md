@@ -120,7 +120,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
 
 # 发布 Msixpkg.Build 到 nuget.org：由 CI 做（OIDC，无需长期密钥）
 git tag v0.2.0; git push origin v0.2.0     # 或在 Actions 里手动 Run workflow（可 dry_run=true）
-# 需要先在 nuget.org 建信任策略 + 仓库加 Secret NUGET_USER，见 docs/nuget-package.md §5
+# 需要先在 nuget.org 建信任策略 + 仓库加 Secret NUGET_USER（已配好），见 docs/nuget-package.md §5
 
 # 分发安装包（NSIS）：构建 + 安装/卸载验收（都不需要管理员）
 powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1
@@ -203,10 +203,13 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
    不声明成 NuGet 依赖）。`Msixpkg.Core` 与 `Msixpkg.Packer` 都不再 `IsPackable`：前者随包走，
    后者是开发机 / CI 的构建期 CLI。本地验收：`scripts\pack-nuget.ps1` +
    `tests\e2e\nuget-package-e2e.ps1`（见 [`nuget-package.md`](nuget-package.md)）。
-   **发布流水线已接**：[`.github/workflows/nuget-publish.yml`](../.github/workflows/nuget-publish.yml)
+   **发布流水线已接并已发出版本**：[`.github/workflows/nuget-publish.yml`](../.github/workflows/nuget-publish.yml)
    用 nuget.org 的 **Trusted Publishing（OIDC）**，由 tag `v*` 或手动 `workflow_dispatch` 触发，
-   仓库里不存长期密钥。剩下的只是 owner 在平台侧点一次：nuget.org 建一条指向本仓库 /
-   `nuget-publish.yml` 的信任策略，仓库加一个 Secret `NUGET_USER`（nuget.org 用户名）。
+   仓库里不存长期密钥。`v0.1.0` 已于 2026-10-17 发布：
+   <https://www.nuget.org/packages/Msixpkg.Build/0.1.0>（发布记录
+   [run 38944111342](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）。
+   下一次发布只需 `git tag v0.2.0 && git push origin v0.2.0`（记得同步改
+   `samples\MsixpkgPackageSample` 里钉的版本）。
    **包的验收（那 25 项）刻意只留在本机脚本里，不占 CI。**
 4. ~~`.msixpkg` 文件关联（`HKLM\Software\Classes`）与「双击安装」体验。~~
    **已完成**：`.msixpkg` 关联（ProgID `Msixpkg.Package` → `msixpkg-installer.exe "%1"`，
@@ -232,7 +235,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | 原生 CLI 对黄金样本的校验（跨语言门禁） | ✅ `--pin --require-pin --dry-run` exit 0 |
 | 负例 E2E（`tests/e2e/msixpkg-negative.ps1`） | ✅ 33 项检查全过（含「dry-run 连目录都不建」） |
 | `Msixpkg.Build` NuGet 包：包布局 / 元数据 / PackageReference 消费 / 两个 MSBuild 宿主下与黄金样本**逐字节相同** / 全部条目 store | ✅ `tests/e2e/nuget-package-e2e.ps1`：checks 25, failures 0 |
-| 包发布到 nuget.org | ⚠️ 流水线已接（`nuget-publish.yml`，OIDC + tag/手动触发）；**还没真正发布过** —— 需要 owner 先在 nuget.org 建信任策略并在仓库加 Secret `NUGET_USER` |
+| 包发布到 nuget.org | ✅ **`Msixpkg.Build 0.1.0` 已发布**（<https://www.nuget.org/packages/Msixpkg.Build/0.1.0>）：tag `v0.1.0` → `nuget-publish.yml` → OIDC 临时 key → `dotnet nuget push` 全部成功（[run 38944111342](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）；发布前的本机验收 25/25 |
 | GUI：窗口起来、SUMMARY 内容正确 | ✅ 截图 + UIA 名称逐项核对 |
 | GUI：同意页的安全门 | ✅ 程序化断言：未勾「我了解并同意」→ 安装按钮禁用、信任框也禁用；未钉扎时**必须**再勾「信任此发布者」按钮才可用；取消勾选立刻回到禁用 |
 | GUI：PROGRESS / RESULT / MANAGE 的视觉 | ⚠️ MANAGE 有截图；PROGRESS / RESULT 到不了（要真装一次） |
