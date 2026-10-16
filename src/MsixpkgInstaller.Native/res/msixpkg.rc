@@ -1,0 +1,47 @@
+// 向导的资源编译单元（docs/installer-design.md §8）。
+//
+// 只做三件事：图标、版本信息、把两张字符串表 include 进来。
+// 字符串为何单独一个文件：它是唯一需要交给翻译/校对的部分，单独一个文件能避免
+// 他们改动到与代码耦合的控件编号。
+//
+// /c65001：本文件与 res/strings.rc 都是 UTF-8（无 BOM），必须显式告诉 rc.exe，
+// 否则它会按系统 ANSI 代码页解码中文（与 /utf-8 对编译器的作用完全相同）。
+#pragma code_page(65001)
+
+#include <windows.h>
+#include "resource.h"
+
+// 图标：资源 ID 1，与 wWinMain 里 LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_MSIXPKG)) 对应。
+IDI_MSIXPKG ICON "msixpkg.ico"
+
+// 版本信息：让「属性 → 详细信息」能显示版本；ARP 条目的 DisplayVersion 用的是
+// 容器清单里的应用版本（那是用户关心的），这里是安装器自身的版本。
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION 0, 2, 0, 0
+    PRODUCTVERSION 0, 2, 0, 0
+    FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+    FILEFLAGS 0x0L
+    FILEOS VOS_NT_WINDOWS32
+    FILETYPE VFT_APP
+    FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "MsixpkgInstaller"
+            VALUE "FileDescription", "Msixpkg Installer"
+            VALUE "FileVersion", "0.2.0.0"
+            VALUE "InternalName", "msixpkg-installer"
+            VALUE "OriginalFilename", "msixpkg-installer.exe"
+            VALUE "ProductName", "Msixpkg Installer"
+            VALUE "ProductVersion", "0.2.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+#include "strings.rc"
