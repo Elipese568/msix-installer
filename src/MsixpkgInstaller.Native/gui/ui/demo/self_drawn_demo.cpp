@@ -464,35 +464,43 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.table->set_selected_row(0, false);
 
     // ---- 证书详情 ----
-    auto* details_caption = root->emplace<Label>(L"证书详情（TextView：滚轮/滚动条、Tab 聚焦、Ctrl+A/C 复制）", base.caption);
-    details_caption->bounds = {18.0f, 280.0f, 724.0f, 16.0f};
+    // 外面套一张卡片：卡片是不透明表面，文字才能走 ClearType；直接贴在
+    // Mica 上的文字只能用灰度 AA。
+    auto* details_card = root->emplace<Card>();
+    details_card->bounds = {18.0f, 276.0f, 724.0f, 152.0f};
+
+    auto* details_caption = details_card->emplace<Label>(L"证书详情（TextView：滚轮/滚动条、Tab 聚焦、Ctrl+A/C 复制）", base.caption);
+    details_caption->bounds = {32.0f, 288.0f, 696.0f, 16.0f};
     details_caption->set_tone(LabelTone::Secondary);
 
-    app.details = root->emplace<TextView>(details_text(), base.mono);
-    app.details->bounds = {18.0f, 298.0f, 724.0f, 128.0f};
+    app.details = details_card->emplace<TextView>(details_text(), base.mono);
+    app.details->bounds = {32.0f, 306.0f, 696.0f, 112.0f};
 
-    // ---- 同意 + 进度 ----
-    app.consent = root->emplace<Checkbox>(L"我了解并同意导入上述发布者证书（演示不会真的操作证书）");
-    app.consent->bounds = {18.0f, 438.0f, 640.0f, 22.0f};
+    // ---- 同意 + 进度 + 状态 ----
+    auto* footer = root->emplace<Card>();
+    footer->bounds = {18.0f, 436.0f, 724.0f, 112.0f};
+
+    app.consent = footer->emplace<Checkbox>(L"我了解并同意导入上述发布者证书（演示不会真的操作证书）");
+    app.consent->bounds = {32.0f, 450.0f, 696.0f, 22.0f};
     app.consent->set_checked(true);
 
-    app.progress = root->emplace<ProgressBar>();
-    app.progress->bounds = {18.0f, 470.0f, 600.0f, 16.0f};
+    app.progress = footer->emplace<ProgressBar>();
+    app.progress->bounds = {32.0f, 482.0f, 540.0f, 16.0f};
 
-    app.percent = root->emplace<Label>(L"0%", base.body);
-    app.percent->bounds = {630.0f, 466.0f, 112.0f, 22.0f};
+    app.percent = footer->emplace<Label>(L"0%", base.body);
+    app.percent->bounds = {578.0f, 478.0f, 146.0f, 22.0f};
     app.percent->set_align(TextAlign::Right);
     app.percent->set_valign(TextVAlign::Center);
     app.percent->set_tone(LabelTone::Secondary);
 
-    app.status = root->emplace<Label>(L"就绪。按「开始演示安装」或 Enter。", base.body);
-    app.status->bounds = {18.0f, 496.0f, 724.0f, 20.0f};
+    app.status = footer->emplace<Label>(L"就绪。按「开始演示安装」或 Enter。", base.body);
+    app.status->bounds = {32.0f, 506.0f, 696.0f, 18.0f};
     app.status->set_tone(LabelTone::Secondary);
 
-    auto* hint = root->emplace<Label>(
+    auto* hint = footer->emplace<Label>(
         L"Tab / Shift+Tab 切换焦点 · Enter 触发默认按钮 · Space 切换复选框 · Esc 退出 · Ctrl+A/C 复制详情",
         base.caption);
-    hint->bounds = {18.0f, 522.0f, 724.0f, 16.0f};
+    hint->bounds = {32.0f, 528.0f, 696.0f, 16.0f};
     hint->set_tone(LabelTone::Secondary);
 
     // ---- 底部按钮 ----

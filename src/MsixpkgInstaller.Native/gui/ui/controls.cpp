@@ -1,4 +1,4 @@
-#include "controls.h"
+﻿#include "controls.h"
 
 #include "host.h"
 #include "theme.h"
@@ -181,7 +181,7 @@ void Button::paint(Canvas& canvas) {
     Color background;
     Color foreground;
     if (!enabled) {
-        background = current.control.with_alpha(current.control.a * 0.55f);
+        background = current.control.mix(current.card, 0.45f);
         foreground = current.text_disabled;
     } else if (primary_) {
         background = current.accent;

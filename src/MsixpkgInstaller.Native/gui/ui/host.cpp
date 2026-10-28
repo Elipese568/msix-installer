@@ -381,6 +381,9 @@ void Host::render(HDC dc) {
     frame_->clear_transparent();
     Canvas& canvas = frame_->canvas();
 
+    canvas.set_defer_text(true);
+    canvas.clear_text_commands();
+
     const RectF client{0.0f, 0.0f, dip(static_cast<float>(client_width_px_)),
                        dip(static_cast<float>(client_height_px_))};
     if (material_kind_ == MaterialKind::Solid) {
@@ -390,6 +393,55 @@ void Host::render(HDC dc) {
     if (root_ != nullptr) {
         root_->paint(canvas);
     }
+
+    // 文字分两路回放：
+    //   1) 背景透明（直接贴在 Mica/Acrylic 上）→ GDI+ 灰度 AA，写进帧的 alpha；
+    //   2) 背景不透明（卡片/控件/表格）→ GDI ClearType，子像素渲染，清晰度与
+    //      标准 Win32 控件一致。
+    // 采样必须在任何文字真正落笔之前完成，否则会把上一轮文字算进背景。
+    canvas.flush();
+    const auto& commands = canvas.text_commands();
+    std::vector<uint8_t> use_gdi(commands.size(), 0);
+
+    const auto visible_area = [](const TextCommand& command) {
+        if (command.clip.empty()) {
+            return command.rect;
+        }
+
+        const float x = std::max(command.rect.x, command.clip.x);
+        const float y = std::max(command.rect.y, command.clip.y);
+        const float right = std::min(command.rect.right(), command.clip.right());
+        const float bottom = std::min(command.rect.bottom(), command.clip.bottom());
+        if (right <= x || bottom <= y) {
+            return RectF{};
+        }
+
+        return RectF{x, y, right - x, bottom - y};
+    };
+
+    for (size_t index = 0; index < commands.size(); ++index) {
+        use_gdi[index] = canvas.min_alpha(visible_area(commands[index])) >= 235 ? 1 : 0;
+    }
+
+    for (size_t index = 0; index < commands.size(); ++index) {
+        if (use_gdi[index] == 0) {
+            const TextCommand& command = commands[index];
+            canvas.draw_text_immediate(command.text, command.rect, command.style, command.color, command.clip);
+        }
+    }
+
+    canvas.flush();
+    for (size_t index = 0; index < commands.size(); ++index) {
+        if (use_gdi[index] != 0) {
+            gdi_text_.draw(frame_->memory_dc(), commands[index], dpi_);
+            // GDI 文字在 DIB 上留下 alpha=0 的字形像素；这块背景本来就是不透明的，
+            // 直接置 255，Mica 模式才不会把文字当成透明洞透出材质。
+            canvas.make_opaque(visible_area(commands[index]));
+        }
+    }
+
+    canvas.clear_text_commands();
+    canvas.set_defer_text(false);
 
     if (presenter_ != nullptr) {
         presenter_->present(*frame_, dc);

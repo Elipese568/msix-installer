@@ -10,6 +10,18 @@ Gdiplus::RectF to_gdiplus(const RectF& rect) {
     return Gdiplus::RectF(rect.x, rect.y, rect.width, rect.height);
 }
 
+RectF intersect_rect(const RectF& left, const RectF& right) {
+    const float x = std::max(left.x, right.x);
+    const float y = std::max(left.y, right.y);
+    const float r = std::min(left.right(), right.right());
+    const float b = std::min(left.bottom(), right.bottom());
+    if (r <= x || b <= y) {
+        return {};
+    }
+
+    return {x, y, r - x, b - y};
+}
+
 float clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
 }
@@ -98,17 +110,25 @@ Gdiplus::Color Color::to_gdiplus() const {
 // Canvas
 // ============================================================================
 
-Canvas::Canvas(Gdiplus::Bitmap& bitmap, float dpi) : graphics_(std::make_unique<Gdiplus::Graphics>(&bitmap)) {
+Canvas::Canvas(Gdiplus::Bitmap& bitmap, float dpi, uint8_t* pixels, int stride_bytes, int width_px,
+               int height_px)
+    : graphics_(std::make_unique<Gdiplus::Graphics>(&bitmap)),
+      dpi_(dpi > 0.0f ? dpi : 96.0f),
+      pixels_(pixels),
+      stride_bytes_(stride_bytes),
+      width_px_(width_px),
+      height_px_(height_px) {
     graphics_->SetPageUnit(Gdiplus::UnitPixel);
     graphics_->SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    graphics_->SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-    // 预乘 alpha 的帧上不要用 ClearType：子像素抗锯齿会在透明边上出彩边
-    // （docs/self-drawn-ui-framework.md §3.3）。
+    graphics_->SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+    // GDI+ 的 ClearType 在预乘 alpha 位图上会出彩边/重影（实测），这里只用灰度
+    // AA；真正清晰的文字由 Host 在不透明表面上用 GDI ClearType 回放
+    // （docs/self-drawn-ui-framework.md §3.3 方案一）。
     graphics_->SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
     graphics_->SetCompositingMode(Gdiplus::CompositingModeSourceOver);
     graphics_->SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
     graphics_->SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBilinear);
-    set_dpi(dpi);
+    set_dpi(dpi_);
 }
 
 Canvas::~Canvas() = default;
@@ -276,10 +296,95 @@ void Canvas::draw_text(std::wstring_view text, const RectF& rect, const TextStyl
         return;
     }
 
+    if (defer_text_) {
+        TextCommand command;
+        command.text.assign(text);
+        command.rect = rect;
+        command.style = style;
+        command.color = color;
+        command.clip = current_clip();
+        text_commands_.push_back(std::move(command));
+        return;
+    }
+
+    draw_text_immediate(text, rect, style, color);
+}
+
+void Canvas::draw_text_immediate(std::wstring_view text, const RectF& rect, const TextStyle& style,
+                                 const Color& color, const RectF& clip) {
+    if (text.empty() || rect.empty() || color.a <= 0.0f) {
+        return;
+    }
+
     Gdiplus::Font* font = font_for(style);
     Gdiplus::StringFormat* format = draw_format(style);
     Gdiplus::SolidBrush brush(color.to_gdiplus());
+
+    if (clip.empty()) {
+        graphics_->DrawString(text.data(), static_cast<INT>(text.size()), font, to_gdiplus(rect), format, &brush);
+        return;
+    }
+
+    const Gdiplus::GraphicsState state = graphics_->Save();
+    graphics_->SetClip(to_gdiplus(clip), Gdiplus::CombineModeIntersect);
     graphics_->DrawString(text.data(), static_cast<INT>(text.size()), font, to_gdiplus(rect), format, &brush);
+    graphics_->Restore(state);
+}
+
+RectF Canvas::current_clip() const {
+    if (!clip_rects_.empty()) {
+        return clip_rects_.back();
+    }
+
+    const float scale = dpi_ / 96.0f;
+    return {0.0f, 0.0f, static_cast<float>(width_px_) / scale, static_cast<float>(height_px_) / scale};
+}
+
+uint8_t Canvas::min_alpha(const RectF& dip_rect) const {
+    if (pixels_ == nullptr || stride_bytes_ <= 0 || width_px_ <= 0 || height_px_ <= 0) {
+        return 255;
+    }
+
+    const float scale = dpi_ / 96.0f;
+    const int x0 = std::clamp(static_cast<int>(std::floor(dip_rect.x * scale)), 0, width_px_ - 1);
+    const int y0 = std::clamp(static_cast<int>(std::floor(dip_rect.y * scale)), 0, height_px_ - 1);
+    const int x1 = std::clamp(static_cast<int>(std::ceil(dip_rect.right() * scale)), x0 + 1, width_px_);
+    const int y1 = std::clamp(static_cast<int>(std::ceil(dip_rect.bottom() * scale)), y0 + 1, height_px_);
+
+    uint8_t minimum = 255;
+    for (int row = 0; row < 3; ++row) {
+        const int y = y0 + (y1 - y0 - 1) * row / 2;
+        const uint8_t* line = pixels_ + static_cast<size_t>(y) * static_cast<size_t>(stride_bytes_);
+        for (int column = 0; column < 5; ++column) {
+            const int x = x0 + (x1 - x0 - 1) * column / 4;
+            minimum = std::min(minimum, line[static_cast<size_t>(x) * 4 + 3]);
+        }
+    }
+
+    return minimum;
+}
+
+void Canvas::make_opaque(const RectF& dip_rect) {
+    if (pixels_ == nullptr || stride_bytes_ <= 0 || width_px_ <= 0 || height_px_ <= 0) {
+        return;
+    }
+
+    const float scale = dpi_ / 96.0f;
+    const int x0 = std::clamp(static_cast<int>(std::floor(dip_rect.x * scale)) - 1, 0, width_px_);
+    const int y0 = std::clamp(static_cast<int>(std::floor(dip_rect.y * scale)) - 1, 0, height_px_);
+    const int x1 = std::clamp(static_cast<int>(std::ceil(dip_rect.right() * scale)) + 1, 0, width_px_);
+    const int y1 = std::clamp(static_cast<int>(std::ceil(dip_rect.bottom() * scale)) + 1, 0, height_px_);
+
+    for (int y = y0; y < y1; ++y) {
+        uint8_t* line = pixels_ + static_cast<size_t>(y) * static_cast<size_t>(stride_bytes_);
+        for (int x = x0; x < x1; ++x) {
+            line[static_cast<size_t>(x) * 4 + 3] = 255;
+        }
+    }
+}
+
+void Canvas::flush() {
+    graphics_->Flush(Gdiplus::FlushIntentionSync);
 }
 
 void Canvas::draw_icon(IconId icon, const RectF& rect, const Color& color) {
@@ -369,8 +474,10 @@ void Canvas::draw_image(const Gdiplus::Image& image, const RectF& rect) {
 }
 
 void Canvas::push_clip(const RectF& rect) {
+    const RectF clip = intersect_rect(current_clip(), rect);
+    clip_rects_.push_back(clip);
     clips_.push_back(graphics_->Save());
-    graphics_->SetClip(to_gdiplus(rect), Gdiplus::CombineModeIntersect);
+    graphics_->SetClip(to_gdiplus(clip), Gdiplus::CombineModeIntersect);
 }
 
 void Canvas::pop_clip() {
@@ -380,6 +487,9 @@ void Canvas::pop_clip() {
 
     graphics_->Restore(clips_.back());
     clips_.pop_back();
+    if (!clip_rects_.empty()) {
+        clip_rects_.pop_back();
+    }
 }
 
 void Canvas::reset_clip() {
@@ -387,6 +497,8 @@ void Canvas::reset_clip() {
         graphics_->Restore(clips_.back());
         clips_.pop_back();
     }
+
+    clip_rects_.clear();
 }
 
 SizeF Canvas::measure_text(std::wstring_view text, float max_width, const TextStyle& style) {
@@ -469,7 +581,8 @@ void Frame::create(int width_px, int height_px, float dpi) {
         return;
     }
 
-    canvas_ = std::make_unique<Canvas>(*bitmap_, dpi_);
+    canvas_ = std::make_unique<Canvas>(*bitmap_, dpi_, static_cast<uint8_t*>(bits_), width_px_ * 4, width_px_,
+                                       height_px_);
 }
 
 void Frame::destroy() {

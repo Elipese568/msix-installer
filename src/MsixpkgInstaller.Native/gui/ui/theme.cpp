@@ -1,4 +1,4 @@
-#include "theme.h"
+﻿#include "theme.h"
 
 #include <algorithm>
 
@@ -95,7 +95,7 @@ Theme make_theme(Appearance appearance, bool material_visible) {
     theme.body = make_style(14.0f, 400);
     theme.caption = make_style(12.0f, 400);
     theme.button = make_style(14.0f, 400);
-    theme.mono = make_style(13.0f, 400);
+    theme.mono = make_style(12.0f, 400);
     theme.mono.family = L"Consolas";
 
     if (appearance == Appearance::HighContrast) {
@@ -156,18 +156,19 @@ Theme make_theme(Appearance appearance, bool material_visible) {
     }
 
     if (theme.material_visible) {
-        // 半透明卡片：材质从底下透出来。Solid 下这些值会发灰，所以分两套。
-        theme.card = dark ? Color::rgba(38, 38, 38, 0.66f) : Color::rgba(255, 255, 255, 0.70f);
-        theme.card_border = dark ? Color::rgba(255, 255, 255, 0.09f) : Color::rgba(0, 0, 0, 0.08f);
-        theme.control = dark ? Color::rgba(255, 255, 255, 0.06f) : Color::rgba(255, 255, 255, 0.58f);
-        theme.control_border = dark ? Color::rgba(255, 255, 255, 0.12f) : Color::rgba(0, 0, 0, 0.12f);
-        theme.control_hover = dark ? Color::rgba(255, 255, 255, 0.12f) : Color::rgba(255, 255, 255, 0.82f);
-        theme.control_pressed = dark ? Color::rgba(255, 255, 255, 0.18f) : Color::rgba(255, 255, 255, 0.40f);
-        theme.table_header = dark ? Color::rgba(255, 255, 255, 0.05f) : Color::rgba(255, 255, 255, 0.45f);
-        theme.table_hover = dark ? Color::rgba(255, 255, 255, 0.04f) : Color::rgba(0, 0, 0, 0.03f);
-        theme.progress_track = dark ? Color::rgba(255, 255, 255, 0.10f) : Color::rgba(0, 0, 0, 0.08f);
+        // 卡片/控件完全不透明：不透明表面才能用 GDI ClearType 回放文字；
+        // 半透明表面只能用灰度 AA（会发虚）。材质仍然透在页面背景与卡片之间。
+        theme.card = dark ? Color::rgb(43, 43, 43) : Color::rgb(250, 250, 250);
+        theme.card_border = dark ? Color::rgba(255, 255, 255, 0.10f) : Color::rgba(0, 0, 0, 0.10f);
+        theme.control = dark ? Color::rgb(0x32, 0x32, 0x32) : Color::rgb(0xFF, 0xFF, 0xFF);
+        theme.control_border = dark ? Color::rgba(255, 255, 255, 0.14f) : Color::rgba(0, 0, 0, 0.14f);
+        theme.control_hover = dark ? Color::rgb(0x3A, 0x3A, 0x3A) : Color::rgb(0xF6, 0xF6, 0xF6);
+        theme.control_pressed = dark ? Color::rgb(0x2E, 0x2E, 0x2E) : Color::rgb(0xEC, 0xEC, 0xEC);
+        theme.table_header = dark ? Color::rgb(0x2A, 0x2A, 0x2A) : Color::rgb(0xF3, 0xF3, 0xF3);
+        theme.table_hover = dark ? Color::rgb(0x34, 0x34, 0x34) : Color::rgb(0xF6, 0xF6, 0xF6);
+        theme.progress_track = dark ? Color::rgb(0x3A, 0x3A, 0x3A) : Color::rgb(0xE6, 0xE6, 0xE6);
         theme.scrollbar_track = Color::transparent();
-        theme.scrollbar_thumb = dark ? Color::rgba(255, 255, 255, 0.28f) : Color::rgba(0, 0, 0, 0.26f);
+        theme.scrollbar_thumb = dark ? Color::rgba(255, 255, 255, 0.30f) : Color::rgba(0, 0, 0, 0.28f);
     } else {
         theme.card = dark ? Color::rgb(0x2B, 0x2B, 0x2B) : Color::rgb(0xFC, 0xFC, 0xFC);
         theme.card_border = dark ? Color::rgb(0x3A, 0x3A, 0x3A) : Color::rgb(0xE2, 0xE2, 0xE2);

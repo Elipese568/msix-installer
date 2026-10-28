@@ -95,9 +95,20 @@ struct SizeF {
     float height = 0.0f;
 };
 
+/// 一条待回放的文字。绘制阶段只记录，整棵树画完后由 Host 决定：
+/// 不透明表面用 GDI ClearType 写进帧（清晰），透明表面用 GDI+ 灰度 AA。
+struct TextCommand {
+    std::wstring text;
+    RectF rect;
+    TextStyle style;
+    Color color;
+    RectF clip;
+};
+
 class Canvas {
 public:
-    Canvas(Gdiplus::Bitmap& bitmap, float dpi);
+    Canvas(Gdiplus::Bitmap& bitmap, float dpi, uint8_t* pixels, int stride_bytes, int width_px,
+           int height_px);
     ~Canvas();
 
     Canvas(const Canvas&) = delete;
@@ -125,18 +136,42 @@ public:
     /// 一行文字的行高（字体度量，不含行距）。
     float line_height(const TextStyle& style);
 
+    // ---- 延迟文字 ----
+    void set_defer_text(bool defer) { defer_text_ = defer; }
+    bool defer_text() const { return defer_text_; }
+    const std::vector<TextCommand>& text_commands() const { return text_commands_; }
+    void clear_text_commands() { text_commands_.clear(); }
+    /// 直接把文字用 GDI+ 画进帧（透明表面 / 分层回退用）。
+    void draw_text_immediate(std::wstring_view text, const RectF& rect, const TextStyle& style, const Color& color,
+                             const RectF& clip = {});
+    /// 文字矩形下方的最小 alpha（0-255）；用于决定能否用 ClearType。
+    uint8_t min_alpha(const RectF& dip_rect) const;
+    /// 把一块区域强制成不透明。GDI 的 DrawTextW 在 32bpp DIB 上会把字形像素的
+    /// alpha 写成 0；在 Mica/Acrylic 模式下 DWM 会当真，文字就变「鬼影」。
+    /// 这块区域本来就落在不透明卡片上，所以置 255 不会产生可见色块。
+    void make_opaque(const RectF& dip_rect);
+    void flush();
+
 private:
     Gdiplus::Graphics& graphics();
     Gdiplus::Font* font_for(const TextStyle& style);
     Gdiplus::StringFormat* draw_format(const TextStyle& style);
     Gdiplus::StringFormat* measure_format(bool wrap);
     float line_ratio(const TextStyle& style);
+    RectF current_clip() const;
 
     std::unique_ptr<Gdiplus::Graphics> graphics_;
     float dpi_ = 96.0f;
+    uint8_t* pixels_ = nullptr;
+    int stride_bytes_ = 0;
+    int width_px_ = 0;
+    int height_px_ = 0;
+    bool defer_text_ = false;
+    std::vector<TextCommand> text_commands_;
     std::unordered_map<std::wstring, std::unique_ptr<Gdiplus::Font>> fonts_;
     std::unordered_map<int, std::unique_ptr<Gdiplus::StringFormat>> formats_;
     std::vector<Gdiplus::GraphicsState> clips_;
+    std::vector<RectF> clip_rects_;
 };
 
 /// 一帧：32bpp 预乘 alpha 的 DIB，既能给 GDI+ 画，也能给 UpdateLayeredWindow 用。

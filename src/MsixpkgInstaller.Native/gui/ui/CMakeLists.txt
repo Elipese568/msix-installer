@@ -21,6 +21,7 @@ set(MSIXPKG_UI_SOURCES
   theme.cpp
   widget.cpp
   controls.cpp
+  gdi_text.cpp
   presenter.cpp
   material.cpp
   host.cpp
