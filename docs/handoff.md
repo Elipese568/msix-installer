@@ -18,7 +18,7 @@
 
 **M0–M7 全部完成**：托管侧（打包器 + MSBuild 任务 + 132 条测试）、
 原生侧（容器读 + 校验器 + 证书存储 + 部署封装 + 状态库 + 编排 + CLI + Win32 向导，
-**58 条原生测试**，Debug/Release 双配置零警告）、E2E 脚本与 CI 都已就位，
+**63 条原生测试**，Debug/Release 双配置零警告）、E2E 脚本与 CI 都已就位，
 构建期打包工具也已经作为 `Msixpkg.Build` NuGet 包产出并通过消费者视角验收。
 
 | 里程碑 | 内容 | 状态 |
@@ -29,7 +29,7 @@
 | M3 | 原生容器读 + 校验器 | ✅ 与 C# 摘要逐字节一致 |
 | M4 | `certstore` + `deployment` + `state` + `log` + `interface.h` + CLI | ✅ |
 | M5 | 引用计数 + `list/verify/repair/clean` + ARP 卸载入口 | ✅ |
-| M6 | Win32 GUI 向导 + `app.manifest` + `res/*.rc` | ✅ |
+| M6 | GUI 向导（**Wren 自绘**，`-DMSIXPKG_GUI_LEGACY=ON` 可回退老 Win32 控件版）+ `app.manifest` + `res/*.rc` | ✅ |
 | M7 | Windows Sandbox E2E + CI + 文档定稿 | ✅ |
 | 分发 | NSIS 安装包（`installer/nsis/`）：把向导 + CLI 装到用户机器，含快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口；另出便携 zip（`%TEMP%` 写不了的容器/沙箱用） | ✅ 46 项 E2E + PATH 逻辑 13 个 NSIS 用例；注册表效果断言需在普通机器/CI 上跑（受限环境子进程写不了 HKCU） |
 | NuGet | `Msixpkg.Build` 任务包（构建期自动产出 `.msixpkg`；Core 作为二进制附属随包） | ✅ MIT；25 项包验收（包布局 + PackageReference 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致）；发布走 `nuget-publish.yml`（tag / 手动触发，OIDC） |
@@ -86,13 +86,27 @@ dotnet build MsixpkgInstaller.slnx
 dotnet build tests\Msixpkg.Core.Tests
 tests\Msixpkg.Core.Tests\bin\Debug\net10.0\Msixpkg.Core.Tests.exe      # 期望：总计 132 成功 132
 
-# 原生：构建 + 测试（58 条）。必须在原生工程目录里跑，CMakePresets 在那里
+# 原生：构建 + 测试（63 条）。必须在原生工程目录里跑，CMakePresets 在那里
 cd src\MsixpkgInstaller.Native
 cmake --preset windows-x64 -S .
 cmake --build --preset windows-x64-debug
-build\x64\Debug\msixpkg_native_tests.exe                              # 期望：总计 58 成功 58
+build\x64\Debug\msixpkg_native_tests.exe                              # 期望：总计 63 成功 63
 cmake --build --preset windows-x64-release                            # /WX 已开，必须零警告
 build\x64\Release\msixpkg_native_tests.exe
+
+# GUI：Wren 五页 + MSAA 无人值守烟测（不需要容器也能跑空态）
+build\x64\Debug\msixpkg-installer.exe --ui-page summary `
+  --ui-report artifacts\ui-report\summary.txt --exit-after 1500
+# 期望 exit 0；报告里有 presenter= / frames= / childCount= / child[i] id= role=name=state=
+powershell -ExecutionPolicy Bypass -File ..\..\tests\e2e\gui-smoke.ps1 `
+  -GuiPath build\x64\Release\msixpkg-installer.exe
+# 期望：checks 81, failures 0（断言按 resource.h 的 IDC_* 取控件，不依赖界面语言）
+# 完整逐页截图（PrintWindow）与交互驱动见 §5；浅色/深色/HC 用 --ui-theme 强制。
+
+# 老 Win32 控件版（回退路径）仍要能编：
+cmake -S . -B build\legacy -G "Visual Studio 18 2026" -A x64 `
+  -DMSIXPKG_GUI_LEGACY=ON -DMSIXPKG_WARNINGS_AS_ERRORS=ON
+cmake --build build\legacy --config Debug --target msixpkg_native_gui
 
 # 安装器 CLI（原生）
 build\x64\Debug\msixpkg-native.exe help
@@ -119,12 +133,12 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
 # 期望：25 项检查全过（两个 MSBuild 宿主都产出 EA972886…A986；找不到 VS 时第二个宿主会跳过）
 
 # 发布 Msixpkg.Build 到 nuget.org：由 CI 做（OIDC，无需长期密钥）
-git tag v0.2.0; git push origin v0.2.0     # 或在 Actions 里手动 Run workflow（可 dry_run=true）
+git tag v0.2.1; git push origin v0.2.1     # 或在 Actions 里手动 Run workflow（可 dry_run=true）
 # 需要先在 nuget.org 建信任策略 + 仓库加 Secret NUGET_USER（已配好），见 docs/nuget-package.md §5
 
 # 分发安装包（NSIS）：构建 + 安装/卸载验收（都不需要管理员）
 powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1
-# 期望：产物 artifacts\setup\MsixpkgInstaller-0.2.0-setup.exe + .sha256（/WX 零告警）
+# 期望：产物 artifacts\setup\MsixpkgInstaller-0.2.1-setup.exe + .sha256（/WX 零告警）
 powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 # 期望：checks 46, failures 0, skipped 2（本机受限环境跳过注册表断言，脚本会打印原因）
 ```
@@ -172,7 +186,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | `src/ops.h` | `list` / `verify` / `repair` / `clean` 的实现（**repair 只输出建议**） |
 | `src/installer.h` 的 `Installer::plan()` | **只读预演**：一次给出「校验结果 + `ConsentRequest` + 动作清单」，零副作用；dry-run / 摘要页 / 同意页共用 |
 | `cli/main.cpp` | 八个子命令 + 退出码 0–7（GUI 之外的另一种前端） |
-| `gui/` + `res/` + `app.manifest` | Win32 向导（SUMMARY / CONSENT / PROGRESS / RESULT / MANAGE）；标准控件 + WS_TABSTOP + IsDialogMessage 键盘导航 |
+| `gui/` + `res/` + `app.manifest` | **Wren 自绘向导**（SUMMARY / CONSENT / PROGRESS / RESULT / MANAGE）：`gui_wizard_wren.cpp` + `gui_widgets.cpp`；单 HWND、绝对 DIP 布局、Host 负责焦点/键盘/DPI/MSAA；窗口级消息用 `SetWindowSubclass`。`-DMSIXPKG_GUI_LEGACY=ON` 回退 `gui_wizard.cpp`（标准控件 + `IsDialogMessage`） |
 
 ### 3.3 夹具（`tests/vectors/`，两端共享）
 
@@ -194,9 +208,9 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 
 1. **在真实机器上跑一次完整闭环**：`tests/e2e/msixpkg-e2e.ps1` 需要提权 + 一份真实签名包；
    本机受限环境跑不了（见 §5）。这是唯一没有端到端验证过的部分。
-2. **GUI 剩下三处的实地验收**（已在模拟输入下验证过安全门，见 §5）：
-   PROGRESS / RESULT 两页要到得了才能看，而到达它们必须真的开始安装；
-   另外值得人工过一遍 150% / 200% DPI 与「取消 UAC 后回到同意页」。
+2. **GUI 的真实安装/卸载闭环**：Wren 版五页已经用合成数据 + PrintWindow + MSAA 驱动逐页验收过
+   （含同意页安全门、结果页三种形态、进度时间线、浅色/深色/高对比度）；真正开始安装后的
+   PROGRESS → RESULT 切换仍要在一台允许 MSIX 部署的机器上过一遍。150% / 200% DPI 也还值得人工看。
 3. ~~`Msixpkg.Build` 打成真正的 NuGet 包（目前是仓库内相对路径 `Import`；跨仓库分发才需要）。~~
    **已完成**：`src/Msixpkg.Build` 产出 `Msixpkg.Build` 包（MIT；`build\Msixpkg.Build.targets` +
    `tasks\netstandard2.0\{Msixpkg.Tasks.dll, Msixpkg.Core.dll}`，Core 作为二进制附属随包分发，
@@ -208,7 +222,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
    仓库里不存长期密钥。`v0.1.0` 已于 2026-10-17 发布：
    <https://www.nuget.org/packages/Msixpkg.Build/0.1.0>（发布记录
    [run 38944111342](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）。
-   下一次发布只需 `git tag v0.2.0 && git push origin v0.2.0`（记得同步改
+   下一次发布只需 `git tag v0.2.1 && git push origin v0.2.1`（记得同步改
    `samples\MsixpkgPackageSample` 里钉的版本）。
    **包的验收（那 25 项）刻意只留在本机脚本里，不占 CI。**
 4. ~~`.msixpkg` 文件关联（`HKLM\Software\Classes`）与「双击安装」体验。~~
@@ -219,10 +233,11 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 6. `ExpectedDigests`（Windows 11 23504+ / UniversalApiContract v15）作为 TOCTOU 的第二道保险；
    目前用「部署前重算 SHA-256 + 暂存目录收紧 ACL」等价覆盖。
 7. 本地化完整性检查：`res/strings.rc` 的 zh-CN / en-US 两套字符串需要逐条比对（缺一条会回退到英文）。
-8. 无障碍复核：控件都是标准类（`STATIC`/`BUTTON`/`PROGRESS_CLASSW`/`WC_LISTVIEWW` + `WS_TABSTOP`），
-   但在本次的 UIA 客户端里它们统一被报成 `ControlType.Pane`（名字与 enabled 正确）。
-   这**可能**只是本机 MSAA→UIA 桥的客户端问题，也可能需要显式提供 UIA provider；
-   结论要用 Accessibility Insights / Inspect 这类工具在另一台机器上确认。
+8. 无障碍复核：Wren 版已通过真实 MSAA 客户端验证根对象 + 子对象（角色/名字/状态/默认动作），
+   Tab 链、Ctrl+A/C、Table 行语义由 Host 提供；但本机 UIA 客户端（`AutomationElement.FromHandle`）
+   仍看不到子元素 —— 这在老标准控件版也一样，可能是本机/会话的 UIA 桥限制，需要换一台普通桌面
+   机器用 Accessibility Insights 复核。`--ui-report` 导出的是 Host 内部的 MSAA 条目；真实
+   `WM_GETOBJECT` 路径用 oleacc 查询单独验证过（见 §6.4）。
 
 ---
 
@@ -231,14 +246,20 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | 项 | 状态 |
 |---|---|
 | 托管 132 条测试 | ✅ 全绿 |
-| 原生 58 条测试（Debug / Release，`/WX`） | ✅ 全绿、零警告 |
+| 原生 63 条测试（Debug / Release，`/WX`） | ✅ 全绿、零警告 |
 | 原生 CLI 对黄金样本的校验（跨语言门禁） | ✅ `--pin --require-pin --dry-run` exit 0 |
 | 负例 E2E（`tests/e2e/msixpkg-negative.ps1`） | ✅ 33 项检查全过（含「dry-run 连目录都不建」） |
 | `Msixpkg.Build` NuGet 包：包布局 / 元数据 / PackageReference 消费 / 两个 MSBuild 宿主下与黄金样本**逐字节相同** / 全部条目 store | ✅ `tests/e2e/nuget-package-e2e.ps1`：checks 25, failures 0 |
 | 包发布到 nuget.org | ✅ **`Msixpkg.Build 0.1.0` 已发布**（<https://www.nuget.org/packages/Msixpkg.Build/0.1.0>）：tag `v0.1.0` → `nuget-publish.yml` → OIDC 临时 key → `dotnet nuget push` 全部成功（[run 38944111342](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）；发布前的本机验收 25/25 |
-| GUI：窗口起来、SUMMARY 内容正确 | ✅ 截图 + UIA 名称逐项核对 |
-| GUI：同意页的安全门 | ✅ 程序化断言：未勾「我了解并同意」→ 安装按钮禁用、信任框也禁用；未钉扎时**必须**再勾「信任此发布者」按钮才可用；取消勾选立刻回到禁用 |
-| GUI：PROGRESS / RESULT / MANAGE 的视觉 | ⚠️ MANAGE 有截图；PROGRESS / RESULT 到不了（要真装一次） |
+| GUI（Wren）：五页渲染 | ✅ `--ui-page` + PrintWindow 截图：SUMMARY / CONSENT / PROGRESS / RESULT / MANAGE；空态、载入成功、深色/浅色/高对比度（`--ui-theme`）都看过 |
+| GUI（Wren）：同意页的安全门 | ✅ 用真实 MSAA 驱动：未勾「我了解并同意」→ 安装按钮禁用、信任框禁用；勾同意 → 信任框可用但安装仍禁用（未钉扎）；再勾「信任此发布者」→ 安装才可用 |
+| GUI（Wren）：同意页流程与复制 | ✅ 一次「下一步」直接进入安装（`preapproved_consent` 生效）；详情 `TextView` 可 Tab 聚焦、Ctrl+A/C；未钉扎警告在复选框上方回流 |
+| GUI（Wren）：进度页时间线 / 动画 | ✅ `--ui-progress 42`：前两阶段对勾、第三阶段进行中、进度条平滑到 42%、日志可见；`--ui-progress 100`：全部完成、无障碍值 100% |
+| GUI（Wren）：结果页三种形态 | ✅ `--ui-result success/failure/cancelled`：标题、状态徽记、正文、日志行、按钮 enabled 状态正确；卸载成功另有「卸载完成」文案 |
+| GUI（Wren）：MSAA | ✅ `AccessibleObjectFromWindow(OBJID_CLIENT)`：根 + 子对象可枚举，角色/名字/状态/默认动作正确；真实 `WM_GETOBJECT` 路径有一次性请求计数 |
+| GUI（Wren）：UIA 桥 | ⚠️ 本机 `AutomationElement.FromHandle` 仍看不到子元素（老标准控件版同样如此），需换普通桌面机器用 Accessibility Insights 复核 |
+| GUI（Wren）：真实安装 / 卸载闭环 | ⚠️ 未在本机跑（包仓库访问被拒）；PROGRESS → RESULT 的真实切换待提权环境 |
+| 老 Win32 控件版（`-DMSIXPKG_GUI_LEGACY=ON`） | ✅ 仍可编译（Debug，`/WX`），只作为逐页回退路径 |
 | 证书存储真实增删（`LocalMachine\TrustedPeople`） | ⚠️ **未在本机跑**（需要管理员；单测用内存存储覆盖同一套 CRUD 逻辑） |
 | 真实 MSIX 安装 / 卸载闭环 | ⚠️ **未在本机跑**（包仓库访问被拒；脚本已写好，需提权环境） |
 | ARP 条目真实写入 | ⚠️ **未在本机跑**（HKLM / HKCU 注册表写都被拒） |
@@ -276,6 +297,11 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | 16 | 新增带中文的 `.ps1` 没有 UTF-8 **BOM** | Windows PowerShell 5.1 对无 BOM 文件按 ANSI（GBK）解析，中文注释会被拆成半个字符，直接**语法错误**。新建脚本后确认前三字节是 `EF BB BF`（`write`/`edit` 工具不会保留 BOM，改动后要重新补） |
 | 17 | CI 里写死 CMake 生成器 `-G "Visual Studio 17 2022"` | 托管运行器会换镜像：`windows-latest` 自 2026-06 起是 Windows Server 2025 + **VS 2026**，写死的名字直接 `could not find any instance of Visual Studio`。用 `scripts\detect-vs-generator.ps1`（vswhere 探测主版本 → 生成器名，写进 `$GITHUB_ENV`），三个原生作业共用 |
 | 18 | makensis 解析 `File` / `OutFile` 相对的是**脚本所在目录**，不是当前工作目录 | `scripts\build-nsis-installer.ps1` 的 `-PayloadDir` / `-OutputDir` 传相对路径 → `File: "build\ci-native\Release\msixpkg-installer.exe" -> no files found.`，`OutFile` 也会写错地方。本机默认路径恰好是绝对的，所以只在 CI 暴露；脚本现在先把路径入参绝对化 |
+| 19 | **GUI 的提权助手用了 `current_executable_path()`** | GUI（`msixpkg-installer.exe`）会把自己以 `runas` 拉起当 `cert-add` 助手，而它不认识这个子命令 → 走进单实例交接 → 与等提权返回的父进程**三方互等死锁**：GUI 永久「未响应」，日志停在 `elevating: …`，证书永远导不进去（`LocalMachine\TrustedPeople` 里始终没有那张证书）。助手必须是**同目录的 CLI**：`helper_executable_path()`；只有 `msixpkg-native.exe` 自己运行时才用自己。另外那行日志以前硬编码打印 `msixpkg-native`，会把这类错误盖住 —— 现在打印真实路径 |
+| 20 | **在 `WM_COPYDATA` / 拖放处理里等编排线程** | 发送方是同步 `SendMessage`，它等我们返回；我们等编排线程；编排线程可能正等那个发送方退出。规则：**消息处理里绝不阻塞 UI 线程** —— 忙碌时回 `kCopyDataBusy`（这个常量以前定义了却从没被回过），发送端用 `SendMessageTimeoutW(SMTO_ABORTIFHUNG\|SMTO_BLOCK, 10s)` 并检查返回码 |
+| 21 | **`peek_data_roots()` 与 `resolve_data_roots()` 选的根可能不同** | 预演按「目录已存在」挑根、安装按「可写」挑根。在「`%ProgramData%\Msixpkg` 存在但普通用户不可写」的机器上，TOFU 记录写进 `%LOCALAPPDATA%\Msixpkg\publishers.json` 却从 `%ProgramData%` 读 → 「信任此发布者（将记住）」**永远不生效**，每次安装都要求重勾（日志里始终是 `pinning: NOT pinned`）。读「记住的发布者」要合并所有已存在的根（`publisher_policy_roots()`）；`MSIXPKG_DATA_ROOT` 覆盖时只认那一个根 |
+| 22 | **ARP 的 `UninstallString` 是 GUI 的命令行** | 它是 `"<安装器路径>" uninstall --family-name <PFN>`（`arp.cpp` 用 `current_executable_path()` 拼的）。GUI 不认 `uninstall` 时会把它当容器路径 → 用户点「卸载」只看到一个 `E_IO`。GUI 现在解析 `uninstall [--family-name\|--install-id]`；其余 CLI 专属子命令（`cert-add` / `cert-remove` / `list` / `verify` / `repair` / `clean`）一律**立刻 exit 3**，绝不落到「容器路径」上（那条路就是坑 19/20 的死锁入口）。诊断写父控制台（`AttachConsole`），**不许弹 MessageBox**：被 `SW_HIDE` 拉起时它是个看不见、又永不消失的模态框 |
+| 23 | **「看不到 UAC」先看策略，不要先怀疑代码** | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\ConsentPromptBehaviorAdmin = 0` 是「**不提示直接提升**」（[MS-GPSB] 2.2.11.2），`EnableLUA=0` 更是彻底没有 UAC —— 这两种机器上 `ShellExecuteEx(runas)` **永远不会有窗口**，助手静默提权跑起来。本机就是策略 0（`PromptOnSecureDesktop=0`），所以 10-17 那三次「卡在 `elevating:` 且没有 UAC」是**旧 GUI 把自己当助手**的死锁，不是提权被拦。现在日志会先打一行 `elevation policy: EnableLUA=… ConsentPromptBehaviorAdmin=…`；`ShellExecuteEx` 返回 `ERROR_ACCESS_DENIED` 会被单独记成 `elevation blocked before any UI`（策略/AppLocker 在弹窗前就拒），与「启动失败」区分开。另：策略把确认框放在普通桌面（`PromptOnSecureDesktop=0`）时窗口可能开在向导后面，所以提权前 GUI 会 `SetForegroundWindow` + `FlashWindowEx` 提示用户 |
 
 ### 6.2 M4–M7 期间新踩的
 
@@ -300,6 +326,28 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
   否则「什么都没装」也报成功。
 - **官方 NSIS 默认 `NSIS_MAX_STRLEN=1024`**：读长 PATH 会静默截断，写回去就是破坏用户的
   PATH；必须用官方 `strlen_8192` 覆盖包，并在运行时按注册表报告的真实字节数再挡一次。
+
+### 6.4 Wren 迁移期间新踩的
+
+- **硬件 Canvas 没有文字度量后端**：`Host::render` 只给 GDI 帧的 Canvas 设了
+  `text_metrics`，D2D 硬件 Canvas 的 `measure_text_width` 于是退回 GDI+，而它没有
+  `Gdiplus::Graphics` —— 任何非空 `TextView` 第一帧就崩在 `Gdiplus::MeasureString`
+  （`0xC000041D` / `0xC0000005`，Event Log 的 fault offset 落在 gdiplus）。
+  修法是在 `Host::render` 里对两种 Canvas 都 `set_text_metrics(&text_engine_)`。
+  症状很容易误判成「某个页面的控件坏了」：SUMMARY/PROGRESS 能亮，CONSENT/RESULT/MANAGE 黑屏。
+- **禁用的主按钮仍画强调色描边**：`Button::paint` 只看 `primary_` 不看 `enabled`，于是
+  结果页失败态的「启动应用」看起来像拿到了焦点。先判 `!enabled` 再走主/次描边。
+- **MSAA 只接受 `CHILDID_SELF`**：根对象的 `validate()` 把 `get_accName(1)` 直接判
+  `E_INVALIDARG`，只支持「先 `get_accChild(1)` 拿子对象再问 `CHILDID_SELF`」。
+  用 oleacc 直接查子对象能过，但 UIA 的 MSAA 桥/部分客户端用「简单子 id」形式就枚举不到。
+  现在根对象同时接受 `1..childCount` 与 `CHILDID_SELF`，`entry_for()` 负责解析。
+- **截图**：DComp 窗口不能用 `CopyFromScreen`（本机会抓到桌面）；用
+  `PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT=2)` 进 `Bitmap` 再存 PNG。GDI 回退路径同样适用。
+- **UIA 客户端在本机看不到子元素**：MSAA 根/子对象都正常、UIA 桌面树也正常，但
+  `AutomationElement.FromHandle` 对本窗口返回 0 个 descendant。老标准控件版同样表现，
+  因此先按「本机/会话的桥限制」记录，别据此断定 MSAA 没实现。
+- **主窗口不在可见桌面上时**：`IsWindowVisible`/`GetWindowRect`/`PrintWindow` 都正常，
+  但屏幕抓图与 UIA 桌面树找不到它。这是受限执行环境的窗口站问题，不是布局 bug。
 
 ---
 

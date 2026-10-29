@@ -25,14 +25,21 @@
 | M3 | 原生容器读 + 校验器 | ✅ 完成（与 C# 摘要逐字节一致） |
 | M4 | 证书助手 + 部署封装 + 状态库/日志 + 编排 + CLI 前端 | ✅ 完成 |
 | M5 | 卸载引用计数 + `list/verify/repair/clean` + ARP 卸载入口 | ✅ 完成 |
-| M6 | Win32 GUI 向导（五页、DPI/深色/本地化/无障碍） | ✅ 完成 |
+| M6 | GUI 向导（五页、DPI/深色/本地化/无障碍）：**Wren 自绘**，`-DMSIXPKG_GUI_LEGACY=ON` 可回退 Win32 标准控件版 | ✅ 完成 |
 | M7 | E2E（负例套件 + 完整闭环 + Windows Sandbox）+ CI + 文档定稿 | ✅ 完成 |
 | 分发 | NSIS 安装包：把向导与 CLI 装到用户机器上（快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口） | ✅ 完成（E2E 46 项 + PATH 逻辑 13 个 NSIS 用例；本机受限环境里跳过的注册表断言由 CI 覆盖，见 [`installer/nsis/README.md`](installer/nsis/README.md)） |
 
 | NuGet | `Msixpkg.Build`：构建期自动产出 `.msixpkg` 的 MSBuild 任务包（MIT；包内 `tasks\` 带 `Msixpkg.Core.dll`） | ✅ 完成并**已发布 `0.1.0`**（<https://www.nuget.org/packages/Msixpkg.Build/0.1.0>）；包验收 25 项：布局 + `PackageReference` 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致；发布走 nuget.org Trusted Publishing/OIDC，见 [`docs/nuget-package.md`](docs/nuget-package.md) |
 
-原生侧测试 **58 条**、托管侧 **132 条**，Debug 与 Release 双配置均绿，Release 开 `/WX`（零警告）；
+原生侧测试 **63 条**、托管侧 **132 条**，Debug 与 Release 双配置均绿，Release 开 `/WX`（零警告）；
 负例 E2E 33 项检查全过（`tests/e2e/msixpkg-negative.ps1`，不需要管理员）。
+
+**安装器 GUI 已迁到 Wren**（单 HWND、retained Widget 树、D2D/DComp + Mica、MSAA）：
+五页都用 `--ui-page` / PrintWindow 截图与真实 MSAA 客户端驱动验收过（含同意页安全门、
+进度时间线、结果页三种形态、浅色/深色/高对比度）；老的 Win32 标准控件版保留在
+`-DMSIXPKG_GUI_LEGACY=ON` 后面作逐页回退。细节见
+[`docs/self-drawn-ui-framework.md`](docs/self-drawn-ui-framework.md) 与
+[`docs/installer-design.md`](docs/installer-design.md) §8。
 
 已验证的关键事实：
 
@@ -82,9 +89,26 @@ msixpkg-native cert-remove --thumbprint-sha1 <sha1>
 退出码：`0` 成功 / `1` 未预期 / `2` 容器校验失败 / `3` 用法 / `4` I/O /
 `5` 部署失败 / `6` 被取消（含拒绝提权）/ `7` 前置条件不满足。
 
+向导（`msixpkg-installer.exe`）的命令行与上面同形：双击 `.msixpkg`、或
+`msixpkg-installer.exe App.msixpkg` 停在摘要页；`--manage` 进管理页；
+`uninstall --family-name <PFN>` 走进度页卸载 —— 「设置 → 应用」里那条卸载入口
+（ARP 的 `UninstallString`）就是这条命令。CLI 专属的子命令
+（`cert-add` / `cert-remove` / `list` / `verify` / `repair` / `clean`）被喂给向导时
+一律以退出码 `3` 立刻失败，绝不会被当成容器路径。
+
+> **看不到 UAC 窗口？** 先看本机策略：`ConsentPromptBehaviorAdmin = 0` 是「不提示直接提升」
+> （`EnableLUA = 0` 则完全没有 UAC），这时 `runas` 本来就不会弹窗，助手是静默提权跑起来的。
+> 安装器会把生效策略写进日志：`elevation policy: EnableLUA=… ConsentPromptBehaviorAdmin=…`。
+> 真正卡住时以日志最后一行为准（正常情况下下一步会写 `certificate: imported (elevated helper)`）；
+> 若策略在弹窗前就拒绝（`ERROR_ACCESS_DENIED`），日志会写 `elevation blocked before any UI`。
+
 ## 分发：用安装包安装这个安装器
 
 用户机器上不该要求他们先找到 exe。用一个 NSIS 包把向导与 CLI 装好并配好入口：
+
+> **安装这个安装包时请「以管理员身份运行」**（右键 →「以管理员身份运行」）。
+> 安装包自身是 `asInvoker`，不会自己弹 UAC；不提权只会装成当前用户级，带主动防御的机器上
+> 文件关联 / PATH / ARP 还可能写不进去。
 
 ```powershell
 # 构建（自动准备 NSIS 工具链；产物 artifacts\setup\MsixpkgInstaller-<版本>-setup.exe）
@@ -103,6 +127,10 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | `MsixpkgInstaller-<版本>-setup.exe` | 真安装：向导 + CLI、开始菜单与（可选）桌面快捷方式、`.msixpkg` 关联（双击 = 用向导打开并停在摘要页）、（可选）PATH 条目、「设置 → 应用」卸载入口 |
 | `run-setup-with-local-temp.cmd` | 免提权启动器：先把 `TEMP`/`TMP` 指到可写位置再启动 setup，专治上面那句 `Error writing temporary file`（带主动防御/未签名被拦的机器上程序文件能装上；注册表那几项若仍被拒，会如实写进 `setup.log`） |
 | `MsixpkgInstaller-<版本>-portable.zip` | 解压即用：容器 / Windows Sandbox / 被安全软件拦住的机器（那里未签名的 exe 连 `%TEMP%` 都写不了，双击 setup 只会弹 `Error writing temporary file`；详见 [`installer/nsis/README.md`](installer/nsis/README.md) §7）。代价是没有快捷方式/关联/PATH/ARP |
+
+`scripts\pack-installer-zip.ps1` 另出一个**面向最终用户的**分发 zip：setup exe + 它的 `.sha256`
+和渲染后的中文 `README.md`（含「以管理员身份运行」、静默安装、使用与卸载指引），产物是
+`artifacts\setup\MsixpkgInstaller-<版本>-dist.zip`。
 
 静默安装支持 `/S /ALLUSERS|/CURRENTUSER /NOASSOC /NOPATH /NODESKTOP /D=<目录>`，
 退出码 `0/4/5/6/7`。它**不**安装任何应用、**不**碰证书存储、**不**删 `%ProgramData%\Msixpkg`
@@ -146,7 +174,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1   # 25 
 ```
 
 发布由 CI 负责（[`.github/workflows/nuget-publish.yml`](.github/workflows/nuget-publish.yml)）：
-`git tag v0.2.0 && git push origin v0.2.0`，或在 Actions 里手动 Run workflow 填版本号。
+`git tag v0.2.1 && git push origin v0.2.1`，或在 Actions 里手动 Run workflow 填版本号。
 用 nuget.org 的 **Trusted Publishing（OIDC）**，仓库里不存长期密钥（信任策略与 `NUGET_USER`
 Secret 都已配好）。**已发布：`Msixpkg.Build 0.1.0`** ——
 <https://www.nuget.org/packages/Msixpkg.Build/0.1.0>。
@@ -166,10 +194,11 @@ src/
   Msixpkg.Build/           NuGet 包 Msixpkg.Build（MIT）：MSBuild 任务 + 可导入的 targets
   MsixpkgInstaller.Native/ C++20 原生安装器（零第三方依赖；CMake）
     cli/                   命令行前端：install / uninstall / list / verify / repair / clean
-    gui/                   Win32 向导（五页）+ res/ 字符串表与图标
+    gui/                   Wren 自绘向导（五页；`gui/ui` 是 Wren submodule）+ res/ 字符串表与图标
+                           `-DMSIXPKG_GUI_LEGACY=ON` 回退老 Win32 标准控件版
     src/                   容器读、校验器、certstore、deployment(C++/WinRT)、state、log、
                            installer 编排、ops、arp
-    tests/                 自写极简测试框架 + 58 条原生测试
+    tests/                 自写极简测试框架 + 63 条原生测试
 tests/
   Msixpkg.Core.Tests/      xunit v3 单元测试（132 条）
   vectors/                 两端共享的夹具（黄金容器、测试证书、合成 .msix、真实 p7x、
@@ -187,6 +216,7 @@ docs/
   integration-winui3.md    真实 Packaged WinUI 3 工程的接入步骤与实测故障排查
   nuget-package.md         Msixpkg.Build 包：布局、安装、可复现构建、本地验收、发布现状
   installer-design.md      原生安装器设计蓝图（进程模型、状态机、API、GUI 页面）
+  self-drawn-ui-framework.md  自绘 GUI 框架（Wren）的设计与迁移记录
   security-model.md        威胁模型、钉扎、证书回收判定、审计字段
 samples/
   SamplePackagedApp/       真实 WinUI 3 单项目 MSIX 工程（winapp new 生成并接入 Msixpkg.Build）
@@ -219,7 +249,7 @@ tests\Msixpkg.Core.Tests\bin\Debug\net10.0\Msixpkg.Core.Tests.exe
 cd src\MsixpkgInstaller.Native
 cmake --preset windows-x64 -S .
 cmake --build --preset windows-x64-debug
-build\x64\Debug\msixpkg_native_tests.exe          # 期望：总计 58 成功 58
+build\x64\Debug\msixpkg_native_tests.exe          # 期望：总计 63 成功 63
 cmake --build --preset windows-x64-release        # Release 开 /WX，必须零警告
 build\x64\Release\msixpkg_native_tests.exe
 

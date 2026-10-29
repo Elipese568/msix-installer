@@ -44,7 +44,7 @@ src/MsixpkgInstaller.Native/
 ### 2.2 后续里程碑的落点
 
 `gui/`、`cli/`、`res/`（`.rc` 与字符串表）、`core/certstore`、`core/deployment`、`core/state`、`core/log`
-都已按 M4–M6 建立（见 §10 的实际布局）。Win32 GUI 与 `.rc` 资源直接加进同一个 CMake 工程
+都已按 M4–M6 建立（见 §10 的实际布局）。GUI 与 `.rc` 资源直接加进同一个 CMake 工程
 （`target_sources` + `win32` 子系统），无需切换构建系统。
 
 
@@ -60,6 +60,18 @@ src/MsixpkgInstaller.Native/
 - `--all-users`：③ 之前由提权阶段把包 stage 到系统卷，再 `ProvisionPackageForAllUsersAsync`；
   卸载对应 `DeprovisionPackageForAllUsersAsync`。**默认关闭**（文档明确 clean reprovision 会移除该包之前的安装）。
 - 单个 exe、多子命令；提权只走高 UAC 的子命令，绝不整程序提权。
+- **助手是 CLI，不是「当前这个 exe」**：提权助手必须是同目录的 `msixpkg-native.exe`
+  （`helper_executable_path()`）。用 `current_executable_path()` 会让 GUI 把自己以
+  `runas` 拉起当 `cert-add` 助手，而它不认识这个子命令 → 单实例交接 →
+  与等提权返回的父进程互等死锁（0.2.0 的真实故障：装 112 MiB 的包时 GUI 永久「未响应」）。
+- 等助手退出**必须有上界**（`WaitForSingleObject` 带超时 + `TerminateProcess`），
+  否则助手卡住就等于安装线程永久卡住，关窗时 UI 线程跟着卡住。
+- **提权是否弹窗不由我们决定，要把生效策略记进日志**：`ConsentPromptBehaviorAdmin = 0`
+  （「不提示直接提升」）或 `EnableLUA = 0` 时 `runas` 永远没有窗口，助手静默提权跑起来；
+  把 `elevation policy: …` 写进日志，并区分 `ERROR_ACCESS_DENIED`（策略在弹窗前拒绝，
+  记成 `elevation blocked before any UI`）与「启动失败」。策略把确认框放在普通桌面
+  （`PromptOnSecureDesktop = 0`）时窗口可能被向导挡住，所以提权前 GUI 要
+  `SetForegroundWindow` + `FlashWindowEx`。
 - WinRT 部署 API 在 MTA 线程 `co_await`：`winrt::init_apartment(winrt::apartment_type::multi_threaded)`。
 - 最低 OS：Windows 10 2004（build 19041）—— `AddPackageByUriAsync` 的下限。
 
@@ -187,21 +199,56 @@ CryptMsgGetParam(hMsg, CMSG_CERT_PARAM, 0, ...);   // 取签名者证书，比 S
 - 兜底：状态库丢失时允许
   `uninstall --family-name <PFN> --cert-thumbprint <sha1>` 手工指定。
 
-## 8. GUI 向导（Win32 原生）
+## 8. GUI 向导（Wren 自绘；Win32 控件版保留为回退）
 
-**技术栈**：纯 Win32 + `comctl32`（v6 manifest 依赖）+ `dwmapi`；不用 MFC/ATL（可选 WIL 作 RAII）。
-子系统 `WINDOWS`，入口 `wWinMain`。
+**技术栈**：默认是 **Wren**（`gui/ui` submodule，C++20、单 HWND、retained Widget 树、
+D2D + DirectComposition 硬件上屏、GDI+ 回退）+ `gui/gui_wizard_wren.cpp`。
+`-DMSIXPKG_GUI_LEGACY=ON` 时构建原来的 Win32 标准控件版（`gui/gui_wizard.cpp`，comctl32），
+用于逐页回退。两套前端共用 `gui_worker.cpp` / `gui_ui.cpp` / `gui_strings.cpp`、
+`SharedState`、消息协议与 `res/*.rc`。子系统 `WINDOWS`，入口 `wWinMain`。
 
-**观感与外壳**
+**Wren 版观感与外壳**
 
-- `app.manifest`：PerMonitorV2 DPI、`supportedOS`、UTF-8 code page、`asInvoker`、`longPathAware`、comctl32 v6。
-- 深色模式：`DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ...)`，
-  初值读 `AppsUseLightTheme`；常量以 `dwmapi.h`/官方文档为准。
-- 背景：Win11 用 `DWMWA_SYSTEMBACKDROP_TYPE` = Mica（`DWMSBT_MAINWINDOW`），
-  圆角用 `DWMWA_WINDOW_CORNER_PREFERENCE`；Win10 回落纯色/直角（靠返回值判定，不假设系统版本）。
-- 基准 720×480 dp，按 DPI 缩放；进度条 owner-draw 或 `PROGRESS_CLASS`；品牌图用 WIC。
-- 文案走 `.rc` 字符串表（zh-CN / en-US 两套）。
-- 无障碍：全部标准控件类（`BUTTON`/`STATIC`/`SYSLINK`）+ `WS_TABSTOP`/`WS_GROUP`，不吞 `WM_GETOBJECT`。
+- 固定 760×480 DIP；PerMonitorV2、DPI 缩放、焦点、键盘、MSAA 根都由 `wren::Host` 负责，
+  页面布局只写 DIP（`bounds`），不再手工 `MulDiv`。
+- 材质与主题：Host 自动 Mica → Acrylic → Solid 降级；高对比度强制 Solid；
+  卡片/文字/控件颜色一律取 `Theme` token，不硬编码颜色。深色标题栏由 Host 设置。
+- 页面外壳：标题 + 副标题 + 四步指示条（确认信息 / 发布者信任 / 正在安装 / 结果）+ 底部导航。
+  管理页隐藏步骤条，动作按钮与「关闭」同排。
+- 自定义控件（`gui/gui_widgets.{h,cpp}`）：`Card`、`Divider`、`StepRail`、`PhaseTimeline`、
+  `StatusMark`、`PackageTile`、`Banner`。装饰性组件角色是 `Role::Panel`（不进 MSAA）；
+  `Banner` 是静态文本（屏幕阅读器可读）。
+- 单 HWND：窗口级消息（`WM_CLOSE` / `WM_DROPFILES` / `WM_COPYDATA` / `WM_APP+1..7`）用
+  `SetWindowSubclass` 挂在 Host 窗口上；其余（焦点/键盘/DPI/材质/MSAA）交给 Host。
+- 焦点链 = Widget 创建顺序；每页只设一个默认按钮；Esc 走 `HostOptions::on_escape` → `WM_CLOSE`
+  （安装中仍先弹确认，绝不直接关窗）。
+- 页面状态机与动作（`begin_preview` / `begin_install` / `submit_consent` /
+  `begin_manage_load` / `begin_uninstall` / `cancel_install` / …）与原实现逐条对应；
+  标准控件层（`create_control` / `WM_CTLCOLOR*` / `NM_CUSTOMDRAW` / `repaint_behind` /
+  `IsDialogMessage`）已删除。
+- **安装 / 卸载结果分开**：结果页按 `installing_` 区分「安装完成 / 卸载完成」与
+  「安装失败 / 卸载失败」，卸载成功不再复用安装正文。
+- 无障碍：Host 暴露 MSAA 根与子对象；`TextView` 暴露全文 + READONLY，`Table` 行暴露
+  LISTITEM，`Checkbox` 暴露 CHECKED/UNAVAILABLE。验证入口见 §8.1。
+- 文案仍走 `.rc` 字符串表（zh-CN / en-US 两套）。基准窗口从 720×480 调到 760×480，
+  以容纳管理页四个动作按钮同排。
+
+### 8.1 诊断参数（只影响 GUI 这一次运行）
+
+| 参数 | 作用 |
+|---|---|
+| `--ui-page <summary\|consent\|progress\|result\|manage>` | 强制打开某一页（缺数据按空态渲染） |
+| `--ui-result <success\|failure\|cancelled\|declined>` | 往结果页塞一份合成结果（不启动编排线程） |
+| `--ui-progress <0..100>` | 合成阶段/百分比/日志，验证时间线与进度动画 |
+| `--ui-theme <auto\|light\|dark\|hc>` | 强制外观（浅色/深色/高对比度截图回归） |
+| `--ui-material <auto\|solid\|mica\|acrylic>` | 强制材质 |
+| `--ui-report <path>` | 退出前写主题、帧统计、MSAA 子对象清单 |
+| `--exit-after <ms>` | 到时间自动关窗，配合 `--ui-report` 做无人值守烟测 |
+
+**老版（legacy）说明**：`MSIXPKG_GUI_LEGACY=ON` 仍然构建 `gui_wizard.cpp`，其 Mica 三步
+（`DWMWA_SYSTEMBACKDROP_TYPE` / `DWMWA_REDIRECTIONBITMAP_ALPHA` / `DwmExtendFrameIntoClientArea`
++ GDI+ `SourceCopy` 清 alpha）、标准控件与 `IsDialogMessage` 导航保持不变。它只作为回退路径，
+新功能（诊断参数、安装/卸载结果区分）不需要在它里面重复实现。
 
 **页面状态机**
 
@@ -216,7 +263,8 @@ CryptMsgGetParam(hMsg, CMSG_CERT_PARAM, 0, ...);   // 取签名者证书，比 S
 **其它行为**
 
 - 单实例：`CreateMutex(L"Global\\MsixpkgInstaller.Single")`；已存在则 `SetForegroundWindow` + `WM_COPYDATA` 传参。
-- 拖放：`DragAcceptFiles` + `WM_DROPFILES` → 载入并跳到 `PAGE_CONSENT`。
+- 拖放：`DragAcceptFiles` + `WM_DROPFILES` → 载入并停在 `PAGE_SUMMARY`（用户可先看摘要再前进；
+  安装进行中丢弃新容器，只提示忙）。
 - 提权助手一律 `SW_HIDE`，避免「UAC 之后又弹黑框」。
 - 退出码与 CLI 一致，CI 复用同一 exe。
 
@@ -278,7 +326,7 @@ HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Msixpkg.<IdentityName>
 | 运维 | `src/ops.{h,cpp}` | `list` / `verify` / `repair` / `clean`；**repair 只输出建议** |
 | 钉扎策略 | `src/policy.{h,cpp}` | 机器级白名单（注册表，两种布局都支持）+ TOFU 记忆（`<数据根>\publishers.json`）；`remember_publisher` 让 UI 上那句「将记住」真的落盘 |
 | CLI | `cli/main.cpp` | 八个子命令 + 退出码 0–7 |
-| GUI | `gui/`、`res/`、`app.manifest` | Win32 向导：SUMMARY / CONSENT / PROGRESS / RESULT / MANAGE；标准控件 + WS_TABSTOP + `IsDialogMessage` 键盘导航 |
+| GUI | `gui/`、`res/`、`app.manifest` | 默认 Wren 自绘向导（SUMMARY / CONSENT / PROGRESS / RESULT / MANAGE）；`-DMSIXPKG_GUI_LEGACY=ON` 回退 Win32 标准控件版 |
 
 `Installer::plan()` 是只读预演入口：一次给出「校验结果 + 同意请求（`ConsentRequest`）+ 动作清单」，
 且**零副作用**（不建目录、不写日志、不碰证书存储）；`--dry-run`、摘要页、同意页共用它。

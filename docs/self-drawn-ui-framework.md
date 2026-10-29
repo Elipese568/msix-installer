@@ -1,5 +1,32 @@
 # 全自绘 GDI+ 安装器 UI 框架设计
 
+> **实现状态（2026-10-29，`feature/self-drawn-ui`）**：Wren 版向导已经落地并成为默认前端
+> （`gui/gui_wizard_wren.cpp` + `gui/gui_widgets.cpp`）；五页、单实例、拖放、`WM_COPYDATA`、
+> 提权前台/闪屏、安装/卸载结果页都已接好，`-DMSIXPKG_GUI_LEGACY=ON` 保留老 Win32 标准控件版
+> 作为逐页回退。下面的设计稿保留当初的论证，但与实现不同的地方以此注为准：
+>
+> - §5.1 的「复用 42 条 `ControlSpec`」没有照搬：Wren 的 `TextView`/`Table`/`Checkbox` 尺寸
+>   与老的固定坐标不再一一对应，硬套会限制新布局。实际做法是每页一个 `Panel`，坐标直接写在
+>   `build_summary/consent/progress/result/manage` 里，统一用 DIP。
+> - 页面外壳多了一条四步指示条（`StepRail`）和阶段时间线（`PhaseTimeline`）；
+>   卡片/分隔线/状态徽记/包图标/警告横幅都是 `gui_widgets.cpp` 里的自定义 Widget。
+> - 实际验证方式（`--ui-page` / `--ui-result` / `--ui-progress` / `--ui-report` + PrintWindow
+>   + 真实 MSAA 客户端）和迁移期踩的坑见 [`handoff.md`](handoff.md) §5 / §6.4。
+
+## 实现截图（2026-10-29）
+
+| 浅色摘要 | 同意页（深色） |
+|---|---|
+| ![摘要](images/self-drawn-ui/installer-summary-light.png) | ![同意页](images/self-drawn-ui/installer-consent-dark.png) |
+
+| 进度（42%，合成数据） | 结果页（失败，合成数据） | 管理页（空态） |
+|---|---|---|
+| ![进度](images/self-drawn-ui/installer-progress.png) | ![结果](images/self-drawn-ui/installer-result-failure.png) | ![管理](images/self-drawn-ui/installer-manage.png) |
+
+> 截图用 `PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT=2)` 抓窗口自身；Mica 是 DWM 在窗口
+> **背后**合成的，不会出现在图里，所以透明区域在 PNG 里是灰底。深色/浅色/HC 的验证仍以
+> `--ui-report` 的 `appearance=` / `material=` 与真实屏幕为准。
+
 > 状态：设计稿（2026-10-28）；框架核心 + demo 已实现
 > （`feature/self-drawn-ui`，2026-10-29，代码与验证记录见
 > [`src/MsixpkgInstaller.Native/gui/ui/README.md`](../src/MsixpkgInstaller.Native/gui/ui/README.md)）

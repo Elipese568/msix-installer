@@ -1,6 +1,9 @@
 #pragma once
 
-// 向导的主窗口对象（内部头：只有 gui_*.cpp 包含它）。
+// 老 Win32 标准控件版向导（legacy 回退，-DMSIXPKG_GUI_LEGACY=ON）。
+//
+// 默认前端是 Wren 版：见 gui_wizard_wren.cpp / gui_widgets.cpp。本文件只保留
+// 「一页行为对不上就整份回退」时需要的窗口类、控件表与消息循环。
 //
 // 一条规则贯穿全文：**只有 UI 线程碰控件**。所有耗时工作都在 gui_worker.cpp 起的
 // std::jthread 上，结果通过 PostMessage 回到这里。
@@ -16,78 +19,16 @@
 #include <vector>
 
 #include "gui_ui.h"
+#include "gui_worker.h"
 
 namespace msixpkg::gui {
 
 /// 注册好的窗口类名。单实例仲裁用 FindWindowW 找已经存在的那个窗口。
 inline constexpr wchar_t kWindowClass[] = L"MsixpkgInstaller.Wizard.v1";
-/// 单实例互斥体名（Global\ 前缀：跨会话也要挡住，否则两个用户同时往证书存储里写）。
-inline constexpr wchar_t kSingleInstanceMutex[] = L"Global\\MsixpkgInstaller.Single";
-/// WM_COPYDATA 的标识，用于把新容器路径交给已有实例。
-inline constexpr ULONG_PTR kCopyDataMagic = 0x4D535850ull;  // 'MSXP'
-/// 已有实例不接受新容器（正在装东西）时的应答码。
-inline constexpr ULONG_PTR kCopyDataBusy = 0x42555359ull;   // 'BUSY'
 
 /// 逻辑（dp）尺寸：按 DPI 缩放后就是真实像素尺寸。720x480 是设计文档给的基准。
 inline constexpr int kBaseWidth = 720;
 inline constexpr int kBaseHeight = 480;
-
-// ---------- 编排线程槽位 ----------
-//
-// 一个槽位同一时刻只跑一个任务。
-//
-// 先说清楚线程归属，因为它决定了后面所有代码的形状：任务函数**带着**它需要的全部
-// 东西（尤其是 WorkerContext 里的 shared_ptr<SharedState>），所以线程自己就是安全的，
-// 不需要槽位替它保命。槽位只负责两件事：
-//   1. run() 之前先把上一个任务停干净（同一时刻只有一条线程在碰证书存储 / 部署栈）；
-//   2. stop() 等到「确实没有线程在跑」才返回。
-//
-// 为什么线程是 detach 的、而不是成员 std::jthread：
-// 编排线程会长时间阻塞在「等用户点击同意」或「等 UAC」上。成员线程对象意味着析构
-// 必须 join，一旦某条唤醒路径漏了，关窗就卡死；而且 UI 线程不该等一个用户没操作的
-// 对话框。detach + 「重置才停、停完才返回」把这两件事解耦：窗口关掉时线程会在
-// 下一个检查点自己退出（Sink 的 PostMessage 也会因为窗口没了而变成空操作）。
-class ThreadSlot {
-public:
-    explicit ThreadSlot(std::shared_ptr<SharedState> shared) : shared_(std::move(shared)) {}
-    ~ThreadSlot();
-
-    ThreadSlot(const ThreadSlot&) = delete;
-    ThreadSlot& operator=(const ThreadSlot&) = delete;
-
-    [[nodiscard]] const std::shared_ptr<SharedState>& shared() const noexcept { return shared_; }
-    /// 当前是否有任务在跑（只有诊断用：渲染时要区分「已完成」与「还没开始」）。
-    [[nodiscard]] bool busy() const noexcept { return busy_.load(); }
-
-    /// 在**新线程**上执行 task(context)。返回前不会阻塞；调用方负责在那之前
-    /// 用 stop()/wait_idle() 确认上一个任务已经退出。
-    void run(const WorkerContext& context, std::function<void(WorkerContext)> task);
-    /// 请求取消（唤醒等待中的同意问答）并等到没有任务在跑。可以安全地多次调用。
-    void stop();
-    /// 只等到没有任务在跑，不请求取消。
-    void wait_idle();
-    /// 任务收尾时由**任务自己**调用（见 gui_worker.cpp 的 start_* 包装）。
-    void mark_idle() noexcept { busy_.store(false); }
-
-private:
-    std::shared_ptr<SharedState> shared_;
-    std::atomic<bool> busy_{false};
-    std::atomic<int> generation_{0};
-};
-
-// ---------- 后台任务（gui_worker.cpp 实现） ----------
-//
-// 这几个函数都**立即返回**：它们只是把任务放进线程槽位。编排线程绝不回调 UI，
-// 只往 SharedState 里写数据 + PostMessage。
-void start_preview(ThreadSlot& slot, HWND hwnd, const std::wstring& container);
-void start_install(ThreadSlot& slot, HWND hwnd);
-void start_manage_load(ThreadSlot& slot, HWND hwnd);
-void start_repair(ThreadSlot& slot, HWND hwnd);
-void start_uninstall(ThreadSlot& slot, HWND hwnd, const std::string& install_id,
-                     const std::wstring& family_name);
-
-/// 结束编排线程：先请求取消（并唤醒可能正在等用户点击的 Ask），再等它退出。
-void stop_worker(ThreadSlot& slot);
 
 class Wizard {
 public:
@@ -101,6 +42,10 @@ public:
     bool create();
     /// 显示窗口；`container` 非空时立刻开始收集摘要，`manage` 为真则直接进管理页。
     void show(const std::wstring& container, bool manage);
+
+    /// 命令行驱动的一次卸载：`uninstall --family-name <PFN>`（ARP 的 UninstallString 就是它）。
+    /// 两个参数给一个即可，install_id 优先。
+    void show_uninstall(const std::wstring& family_name, const std::wstring& install_id);
 
     [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
     [[nodiscard]] std::shared_ptr<SharedState> shared() const noexcept { return shared_; }
@@ -127,6 +72,8 @@ private:
     // ---- 页面 ----
     void show_page(WizardPage page);
     void layout();
+    void layout_consent();
+    void move_control(int id, int x, int y, int width, int height);
     void apply_texts();
     void render_page();
     void render_summary();
@@ -139,10 +86,12 @@ private:
 
     // ---- 动作 ----
     void begin_preview(const std::wstring& container);
-    void begin_install();
+    void begin_install(const ConsentAnswers& answers);
     void submit_consent(bool approved);
     void begin_manage_load();
     void begin_uninstall();
+    /// 进度页 + 编排线程：管理页的「卸载」按钮与命令行卸载都走这里。
+    void begin_uninstall_for(const std::string& install_id, const std::wstring& family_name);
     void cancel_install();
     void open_log_file();
     void open_log_directory();
@@ -155,6 +104,8 @@ private:
     HWND create_control(const ControlSpec& spec);
     void set_text(int id, std::wstring_view text);
     void set_visible(int id, bool visible);
+    /// 让父窗口把 control 覆盖的那块区域重新清成透明（材质生效时擦掉旧字形）。
+    void repaint_behind(HWND control);
     void enable(int id, bool enabled);
     [[nodiscard]] bool is_visible(int id) const;
     [[nodiscard]] bool is_checked(int id) const;
@@ -162,6 +113,9 @@ private:
 
     // ---- 主题 ----
     void apply_theme();
+    /// 在窗口上屏后请求 DWM 的背景材质（Mica）；失败则整个退回纯色底色。
+    void apply_backdrop();
+    void release_brushes();
     void apply_fonts();
     void apply_list_colors();
     [[nodiscard]] int scale(int dp) const;
@@ -182,8 +136,13 @@ private:
     WizardPage page_ = WizardPage::Summary;
     int dpi_ = 96;
     bool dark_ = false;
+    /// DWM 的系统背景材质（Mica）是否真的接上了。为 true 时客户区用 alpha=0 清空，
+    /// 让窗口背后由 DWM 画的材质透出来；任何一次不透明填充都会把它整片盖住。
+    bool backdrop_ = false;
     bool installing_ = false;                // 进度页是否由「安装」进入（区别于卸载）
     bool dropped_in_ = false;                // 由拖放/第二实例换入的容器：跳过摘要页
+    /// 本次安装是否已经为「即将提权」做过一次前台提醒（只做一次，别反复抢焦点）。
+    bool elevation_foregrounded_ = false;
     // 默认 0：仅仅打开向导又关掉，不算失败（CLI 的 list / verify 同样是 0）。
     // 真正的结论由安装结果或容器校验结果覆盖。
     std::atomic<int> exit_code_{exit_code::kSuccess};

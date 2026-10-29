@@ -4,6 +4,8 @@
 #include <commctrl.h>
 #include <shellapi.h>
 
+#include <algorithm>
+#include <cwchar>
 #include <iterator>
 
 namespace msixpkg::gui {
@@ -51,6 +53,10 @@ const ControlSpec kSummary[] = {
 // ---------- 同意页（安全关键） ----------
 // 证书详情放在只读多行编辑框里：标准控件天然支持 Tab 聚焦、Ctrl+A/C 复制与屏幕阅读器
 // 的文本读取，比一堆静态文本更满足 §8 的无障碍要求，也让指纹「可复制」。
+//
+// 注意：这里给出的是**初始**坐标。认可 / 信任发布者 / 未钉扎警告 / --all-users 的位置
+// 会随可见性动态回流（Wizard::layout_consent）：信任框与警告隐藏时，用户选项紧跟
+// 「我了解并同意」，不会在中间留一大块空白。
 const ControlSpec kConsent[] = {
     {IDC_CONSENT_DETAILS, L"EDIT", PageLayout::Consent,
      WS_TABSTOP | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, 0, 18, 74, 684, 152},
@@ -133,6 +139,20 @@ PageLayout layout_group(WizardPage page) {
     return PageLayout::Summary;
 }
 
+namespace {
+
+/// 只有命令行前端（msixpkg-native.exe）实现的子命令。
+/// 向导拿到它们必须**立刻失败**：当成容器路径 → 单实例交接 → 可能死锁。
+bool is_cli_only_subcommand(std::wstring_view token) {
+    constexpr std::wstring_view kCommands[] = {
+        L"list", L"verify", L"repair", L"clean", L"cert-add", L"cert-remove",
+    };
+
+    return std::find(std::begin(kCommands), std::end(kCommands), token) != std::end(kCommands);
+}
+
+}  // namespace
+
 CommandLine parse_command_line(const std::wstring& command_line) {
     CommandLine parsed;
 
@@ -150,8 +170,48 @@ CommandLine parse_command_line(const std::wstring& command_line) {
 
     for (int index = 1; index < argc; ++index) {
         const std::wstring_view token(argv[index]);
+        if (token.empty()) {
+            continue;
+        }
+
         if (token == L"--manage") {
             parsed.manage = true;
+            continue;
+        }
+
+        // ---- 诊断参数：只在 GUI 前端生效，解析失败就忽略（不改变安装语义） ----
+        if (token == L"--ui-page" || token == L"--ui-report" || token == L"--exit-after" ||
+            token == L"--ui-result" || token == L"--ui-theme" || token == L"--ui-material" ||
+            token == L"--ui-progress") {
+            const bool has_value = index + 1 < argc;
+            const std::wstring value = has_value ? std::wstring(argv[index + 1]) : std::wstring();
+            if (has_value) {
+                ++index;
+            }
+
+            if (token == L"--ui-page") {
+                parsed.ui_page = value;
+            } else if (token == L"--ui-report") {
+                parsed.report_path = value;
+            } else if (token == L"--ui-result") {
+                parsed.ui_result = value;
+            } else if (token == L"--ui-theme") {
+                parsed.ui_theme = value;
+            } else if (token == L"--ui-material") {
+                parsed.ui_material = value;
+            } else if (token == L"--ui-progress") {
+                wchar_t* end = nullptr;
+                const long percent = std::wcstol(value.c_str(), &end, 10);
+                if (end != nullptr && *end == L'\0' && percent >= 0 && percent <= 100) {
+                    parsed.ui_percent = static_cast<int>(percent);
+                }
+            } else if (token == L"--exit-after" && !value.empty()) {
+                wchar_t* end = nullptr;
+                const long milliseconds = std::wcstol(value.c_str(), &end, 10);
+                if (end != nullptr && *end == L'\0' && milliseconds > 0 && milliseconds <= 600000) {
+                    parsed.exit_after_ms = static_cast<int>(milliseconds);
+                }
+            }
             continue;
         }
 
@@ -160,13 +220,47 @@ CommandLine parse_command_line(const std::wstring& command_line) {
             continue;
         }
 
-        // 已知的开关型参数直接忽略（GUI 目前只消费容器路径与 --manage）。
-        if (!token.empty() && token.front() == L'-') {
+        // ARP 的卸载入口与 CLI 同形：`uninstall --family-name <PFN>`。
+        if (token == L"uninstall") {
+            parsed.uninstall = true;
             continue;
         }
 
-        if (parsed.container.empty()) {
-            parsed.container = std::filesystem::path(token);
+        if (token == L"--family-name" || token == L"--install-id") {
+            const bool has_value = index + 1 < argc;
+            const std::wstring value = has_value ? std::wstring(argv[index + 1]) : std::wstring();
+            if (has_value) {
+                ++index;
+            }
+
+            if (token == L"--family-name") {
+                parsed.uninstall_family_name = value;
+            } else {
+                parsed.uninstall_install_id = value;
+            }
+
+            continue;
+        }
+
+        // 已知的开关型参数直接忽略（GUI 目前只消费容器路径、卸载参数与 --manage）。
+        if (token.front() == L'-') {
+            continue;
+        }
+
+        // `install <path>` 与直接给 `<path>` 等价：让 GUI / CLI 的命令行可以互换。
+        if (token == L"install") {
+            continue;
+        }
+
+        // 剩下的是 CLI 独有的子命令：认下来、立刻返回，绝不落到「容器路径」上。
+        if (is_cli_only_subcommand(token)) {
+            parsed.unsupported_subcommand = std::wstring(token);
+            ::LocalFree(argv);
+            return parsed;
+        }
+
+        if (parsed.container.empty() && !parsed.uninstall) {
+            parsed.container = std::filesystem::path(std::wstring(token));
         }
     }
 

@@ -1,4 +1,4 @@
-#include "gui_wizard.h"
+#include "gui_worker.h"
 
 // 编排线程：唯一接触引擎（Installer / StateStore / 部署栈 / validate）的编译单元。
 //
@@ -138,6 +138,23 @@ public:
 
     msixpkg::ConsentDecision Ask(const msixpkg::ConsentRequest& request) override {
         (void)request;  // 同意页展示的数据来自第一次 validate（见 build_preview）
+
+        // 同意页已经在用户点「下一步」时把决定交过来了：直接消费，不再发一次
+        // kMsgConsentAsk。否则窗口会把刚勾好的复选框清空、退回同意页，用户必须
+        // 再点一次「下一步」。
+        {
+            const std::lock_guard<std::mutex> guard(context_.shared->mutex);
+            if (context_.shared->preapproved_consent.has_value()) {
+                const ConsentAnswers answers = *context_.shared->preapproved_consent;
+                context_.shared->preapproved_consent.reset();
+
+                msixpkg::ConsentDecision decision;
+                decision.approved = answers.approved;
+                decision.remember_publisher = answers.remember_publisher;
+                decision.all_users = answers.all_users;
+                return decision;
+            }
+        }
 
         auto pending = std::make_shared<PendingConsent>();
         {

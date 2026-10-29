@@ -4,6 +4,7 @@
 
 | 脚本 | 需要什么 | 覆盖什么 |
 |---|---|---|
+| [`gui-smoke.ps1`](gui-smoke.ps1) | 已构建的 `msixpkg-installer.exe`（GUI） | Wren 向导五页 + 同意页安全门 + 进度时间线 + 结果页三种形态 + 主题/材质 + 帧统计；只用 `--ui-*` 合成数据，**不安装任何东西** |
 | [`msixpkg-negative.ps1`](msixpkg-negative.ps1) | 已构建的原生 exe | 篡改 / 截断 / 未钉扎 / 三个单缺陷负例向量 / 用法错误 / **失败必须可读上报** / `repair` 不改动任何东西 / 未提权不许碰证书 |
 | [`nuget-package-e2e.ps1`](nuget-package-e2e.ps1) | .NET SDK（有 VS 更好） | `Msixpkg.Build` 包：包布局与元数据 / `PackageReference` 消费（空包缓存）/ 两个 MSBuild 宿主 / 产出与黄金样本**逐字节相同** / 条目一律 `store` |
 | [`msixpkg-e2e.ps1`](msixpkg-e2e.ps1) | **管理员** + 真实已签名 MSIX（含其 PFX） | 完整闭环：打包 → 安装 → 包已注册 + 证书已受信 + ARP 条目 → 启动应用 → 卸载 → 包与证书都消失 → 重复卸载幂等 → 状态库丢失时的兜底 |
@@ -20,6 +21,11 @@ cmake --build --preset windows-x64-debug
 # 2) 负例套件（无需管理员，几分钟内跑完）
 cd D:\work\source\repos\MsixpkgInstaller
 powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
+
+# 2b) GUI 烟测（无需管理员；只喂合成数据，不安装）
+powershell -ExecutionPolicy Bypass -File tests\e2e\gui-smoke.ps1 `
+    -GuiPath src\MsixpkgInstaller.Native\build\x64\Release\msixpkg-installer.exe
+# 期望：checks 81, failures 0（断言按 resource.h 的 IDC_* 取控件，不依赖界面语言）
 
 # 3) NuGet 包验收（无需管理员；会先打包，再用 PackageReference 样例构建并比对黄金样本）
 powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1

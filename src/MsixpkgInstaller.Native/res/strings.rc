@@ -77,7 +77,7 @@ BEGIN
     401 "Working..."
     402 "Please wait. The installer is not responding to input while a step is running."
     403 "%u%% complete"
-    404 "Waiting for administrator confirmation..."
+    404 "Elevating to import the publisher certificate... (approve the prompt if one appears)"
     405 "Checking the container"
     406 "Extracting the payload"
     407 "Importing the publisher certificate"
@@ -93,6 +93,7 @@ BEGIN
     417 "done"
     418 "failed"
     419 "Removing..."
+    420 "Another instance of the installer is already installing or uninstalling. Wait for it to finish, then try again."
 
     // ---------- 结果页 ----------
     500 "Result"
@@ -112,7 +113,7 @@ BEGIN
     514 "The package signature could not be validated. The file may be corrupted or tampered with; obtain it again from the original source."
     515 "The application is in use. Close it (and any of its windows) and try again."
     516 "A higher version is already installed. Remove it first, or run the installer with the downgrade option."
-    517 "The operation needs administrator rights. Approval was refused or the account cannot elevate."
+    517 "The operation needs administrator rights. The approval was refused, or a policy on this computer blocks elevation. Run the installer as administrator, or ask an administrator to import the publisher certificate."
     518 "A dependency (framework) package could not be installed. Install the required framework package and try again."
     519 "The package is not valid for this computer. Check the package architecture and the minimum Windows version."
     520 "The container failed validation. Re-download the file from its original source and try again."
@@ -120,6 +121,9 @@ BEGIN
     522 "The package architecture does not match this computer."
     523 "See the log for the exact failure code and the steps that were taken."
     524 "Provisioning for all users requires administrator rights and a system-volume copy of the package."
+    525 "Uninstall complete"
+    526 "The application was removed for the current user. The publisher certificate is kept if anything else still needs it."
+    527 "Uninstall failed"
 
     // ---------- 管理页 ----------
     600 "Manage installations"
@@ -154,6 +158,7 @@ BEGIN
     706 "A file operation failed."
     707 "The package could not be deployed."
     708 "The operation was cancelled."
+    709 "This command is provided by msixpkg-native.exe (the command-line front end), not by the installer window."
 END
 
 LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
@@ -220,7 +225,7 @@ BEGIN
     401 "正在处理…"
     402 "请稍候。步骤执行期间安装程序不会响应输入。"
     403 "已完成 %u%%"
-    404 "正在等待管理员确认…"
+    404 "正在以管理员权限导入证书…（若系统弹出确认，请允许）"
     405 "校验容器"
     406 "解包载荷"
     407 "导入发布者证书"
@@ -236,6 +241,7 @@ BEGIN
     417 "完成"
     418 "失败"
     419 "正在卸载…"
+    420 "另一个安装程序实例正在安装或卸载。请等它结束后再试。"
 
     // ---------- 结果页 ----------
     500 "结果"
@@ -255,7 +261,7 @@ BEGIN
     514 "包签名校验失败。文件可能已损坏或被篡改，请从原始来源重新获取。"
     515 "应用正在使用中。请关闭它（及其窗口）后重试。"
     516 "已安装更高的版本。请先卸载它，或用允许降级的选项重新运行安装程序。"
-    517 "该操作需要管理员权限，但审批被拒绝或当前账户无法提权。"
+    517 "该操作需要管理员权限：审批被拒绝，或本机策略禁止提权。可以直接以管理员身份运行安装程序，或请管理员预先导入发布者证书。"
     518 "依赖（框架）包安装失败。请先安装所需的框架包后重试。"
     519 "该包不适用于本机。请检查包架构与最低 Windows 版本。"
     520 "容器未通过校验。请从原始来源重新下载后重试。"
@@ -263,6 +269,9 @@ BEGIN
     522 "包架构与本机不匹配。"
     523 "确切失败码与执行过的步骤都在日志里。"
     524 "为所有用户 provisioning 需要管理员权限，并且包要 stage 到系统卷。"
+    525 "卸载完成"
+    526 "应用已为当前用户移除；如果还有其它东西需要，发布者证书会被保留。"
+    527 "卸载失败"
 
     // ---------- 管理页 ----------
     600 "管理已安装的包"
@@ -286,4 +295,16 @@ BEGIN
     618 "没有需要建议的项：状态库与系统一致。"
     619 "修复只输出建议，绝不擅自改动任何东西。"
     620 "详情"
+
+    // ---------- 错误与兜底 ----------
+    700 "安装程序无法完成"
+    701 "没有提供容器。把 .msixpkg 文件拖到这个窗口，或带路径启动安装程序。"
+    702 "找不到该文件。"
+    703 "成功。"
+    704 "发生了意外错误。"
+    705 "该容器不是有效的 .msixpkg 文件。"
+    706 "文件操作失败。"
+    707 "无法部署该包。"
+    708 "操作已取消。"
+    709 "这个子命令由 msixpkg-native.exe（命令行前端）提供，安装程序窗口不支持它。"
 END

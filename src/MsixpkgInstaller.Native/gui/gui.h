@@ -1,13 +1,15 @@
 #pragma once
 
-// Win32 原生安装向导（docs/installer-design.md §8）。
+// 原生安装向导的前端入口。
 //
 // 分工（§4 的「前端与编排分离」）：
-//   gui_wizard.cpp   —— 窗口、消息循环、五页状态机、控件布局与本地化
-//   gui_worker.cpp   —— 编排线程：Installer 调用、IProgressSink / IConsentProvider /
-//                       ICancelSource 的 GUI 实现、只读的容器摘要收集
-//   gui_manage.cpp   —— 管理页（状态库 → 列表 / 卸载 / 修复建议 / 打开日志与设置）
-//   gui_strings.cpp  —— 字符串表加载与格式化
+//   gui_wizard_wren.cpp —— 默认前端：Wren 单 HWND 自绘向导（五页、消息、状态机、动作）
+//   gui_widgets.cpp     —— 安装器自有的 Wren 控件扩展（Card/StepRail/PhaseTimeline/…）
+//   gui_wizard.cpp      —— 回退前端：老 Win32 标准控件版（-DMSIXPKG_GUI_LEGACY=ON）
+//   gui_worker.cpp      —— 编排线程：Installer 调用、IProgressSink / IConsentProvider /
+//                          ICancelSource 的实现、只读的容器摘要收集
+//   gui_ui.cpp          —— 两套前端共享的数据结构、消息编号与命令行解析
+//   gui_strings.cpp     —— 字符串表加载与格式化
 //
 // 线程模型（只有两条线程在动）：
 //   UI 线程      —— 所有控件都只由它碰；它从不阻塞，也从不调用 Installer。

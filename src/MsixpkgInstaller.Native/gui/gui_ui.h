@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,16 @@ inline constexpr UINT kMsgPreviewReady = WM_APP + 4;      // 摘要页数据就�
 inline constexpr UINT kMsgManageLoaded = WM_APP + 5;      // 管理页数据就绪
 inline constexpr UINT kMsgUninstallDone = WM_APP + 6;     // 卸载结束
 inline constexpr UINT kMsgRepairReady = WM_APP + 7;       // 修复建议算好了
+
+// ---------- 单实例与窗口交接 ----------
+/// 单实例互斥体名（Global\ 前缀：跨会话也要挡住，否则两个用户同时往证书存储里写）。
+inline constexpr wchar_t kSingleInstanceMutex[] = L"Global\\MsixpkgInstaller.Single";
+/// WM_COPYDATA 的标识，用于把新容器路径交给已有实例。
+inline constexpr ULONG_PTR kCopyDataMagic = 0x4D535850ull;  // 'MSXP'
+/// 已有实例不接受新容器（正在装东西）时的应答码。
+inline constexpr ULONG_PTR kCopyDataBusy = 0x42555359ull;   // 'BUSY'
+/// 单实例交接的等待上限。对端卡住时，第二个实例绝不能跟着一起卡死。
+inline constexpr UINT kCopyDataTimeoutMs = 10000;
 
 // ---------- 容器摘要（摘要页 + 同意页的数据） ----------
 struct PackageView {
@@ -171,6 +182,17 @@ struct PendingConsent {
     bool all_users = false;
 };
 
+/// 用户在同意页上按下「下一步」时给出的决定。
+///
+/// 安装线程真正走到 consent.Ask 时，如果这里已经有一份决定就直接消费它，
+/// 不再把同意页推上来 —— 否则用户要点两次「下一步」（第一次只是启动了安装线程，
+/// 线程紧接着又发了一次同意请求）。
+struct ConsentAnswers {
+    bool approved = false;
+    bool remember_publisher = false;
+    bool all_users = false;
+};
+
 // ---------- 共享状态 ----------
 /// 只有「两条线程都碰」的东西才放这里。每个字段都受 mutex 保护；
 /// 例外是几个 atomic 的「握手」标志，它们本身就是同步原语。
@@ -187,6 +209,8 @@ struct SharedState {
     bool waiting_for_elevation = false;
     std::vector<std::wstring> phase_log;
     std::shared_ptr<PendingConsent> consent;   // 本次「请求-应答」；一次性
+    /// 同意页已经给出的决定，只供紧接着的那次 Ask 消费（一次性）。
+    std::optional<ConsentAnswers> preapproved_consent;
 };
 
 // ---------- 编排线程的上下文 ----------
@@ -203,9 +227,41 @@ struct CommandLine {
     std::filesystem::path container;    // 可选的位置参数
     bool manage = false;
     bool help = false;
+
+    /// `uninstall --family-name <PFN>` / `uninstall --install-id <id>`。
+    /// ARP 的 UninstallString 就是这个形状（见 arp.cpp 的 make_arp_entry），
+    /// 所以「设置 → 应用 → 卸载」必须由向导认下来 —— 否则 `uninstall` 会被
+    /// 当成容器路径，用户点卸载只会看到一个 E_IO。
+    bool uninstall = false;
+    std::wstring uninstall_family_name;
+    std::wstring uninstall_install_id;
+
+    /// GUI **不实现**的 CLI 子命令（cert-add / cert-remove / list / verify / repair / clean）。
+    /// 拿到它必须立刻失败退出：把它当容器路径会走进单实例交接，
+    /// 而那正是「提权助手被换成本程序」时死锁的入口（见 gui_wizard.cpp 的 run()）。
+    std::wstring unsupported_subcommand;
+
+    // ---------- 诊断参数（只影响窗口这一次运行，不改变安装语义） ----------
+    /// `--ui-page <summary|consent|progress|result|manage>`：强制打开某一页，
+    /// 用于截图/无障碍回归；缺数据时页面按空态渲染。
+    std::wstring ui_page;
+    /// `--ui-result <success|failure|cancelled|declined>`：往 Result 页塞一份合成结果，
+    /// 只用于截图与无障碍回归（不启动编排线程、不碰系统）。
+    std::wstring ui_result;
+    /// `--ui-theme <auto|light|dark|hc>` / `--ui-material <auto|solid|mica|acrylic>`：
+    /// 强制外观与材质，用于浅色/深色/高对比度截图回归。
+    std::wstring ui_theme;
+    std::wstring ui_material;
+    /// `--ui-progress <0..100>`：塞一份合成进度（阶段 + 日志 + 百分比），用于进度页回归。
+    int ui_percent = -1;
+    /// `--ui-report <path>`：退出前把主题、帧统计、MSAA 子对象写到文件（wren-ui 的验收方式）。
+    std::wstring report_path;
+    /// `--exit-after <ms>`：到时间自动关窗，配合 --ui-report 做无人值守烟测。
+    int exit_after_ms = 0;
 };
 
-/// 解析 `[<container.msixpkg>] [--manage] [--help]`。
+/// 解析 `[install] [<container.msixpkg>] [--manage] [--help]`
+/// 以及 `uninstall [--family-name <PFN>|--install-id <id>]`。
 CommandLine parse_command_line(const std::wstring& command_line);
 
 // ---------- 控件表 ----------

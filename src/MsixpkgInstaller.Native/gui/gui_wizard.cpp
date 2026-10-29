@@ -9,6 +9,8 @@
 #include <Windows.h>
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <objbase.h>
+#include <gdiplus.h>
 #include <shellapi.h>
 
 #include <algorithm>
@@ -31,12 +33,85 @@ namespace {
 constexpr DWORD kBackdropMainWindow = 2;   // DWMSBT_MAINWINDOW = Mica
 constexpr DWORD kCornerRound = 2;          // DWMWCP_ROUND
 
+// ---- 让 Mica 在一套 GDI 窗口里真正可见 ----
+//
+// 这套向导的客户区是 GDI 画的（含 id 各不相同的标准控件），而 Mica 是 DWM 合成在
+// 窗口**背后**的材质。两者要接上，缺一不可的三步（实测：少了第 2 步客户区永远是不
+// 透明的、材质被整片盖住；少了第 3 步材质是浅色的，跟深色窗口不搭）：
+//
+//   1) DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW
+//      告诉 DWM 画哪种材质（Win11 22621+ 才认）。
+//   2) DWMWA_REDIRECTIONBITMAP_ALPHA = TRUE                        —— 关键的一条
+//      默认 DWM 把窗口的重定向位图当**完全不透明**，材质永远被盖在下面。打开这个
+//      属性后才会逐像素看 alpha（Win11 26100+ 才有；更老的系统直接回落纯色）。
+//   3) DwmExtendFrameIntoClientArea(-1 边距)
+//      把客户区纳入扩展边框的合成：材质才会跟随窗口的深色模式（实测只做 1+2 时
+//      客户区拿到的是浅色材质，跟深色窗口不搭）。
+//
+// 有了这三步，客户区里 alpha=0 的像素就透出材质。剩下的问题是 GDI 的填充改不动
+// alpha 通道：FillRect 只会把颜色写进去，alpha 还是 0/不透明——所以底色要用
+// GDI+ 的 SourceCopy 去清（见 WM_ERASEBKGND 与 clear_to_transparent）。
+// 文字与按钮是 GDI 画的，alpha 会被写成不透明，正好留在材质上面。
+constexpr DWORD kRedirectionBitmapAlpha = 39;  // DWMWA_REDIRECTIONBITMAP_ALPHA（Win11 26100+）
+
+/// GDI+ 只在这条路上用得到，所以按需初始化：拿不到材质时连 GDI+ 都不启动。
+bool ensure_gdiplus() {
+    static Gdiplus::GdiplusStartupInput input;
+    static ULONG_PTR token = 0;
+    static const bool ready = Gdiplus::GdiplusStartup(&token, &input, nullptr) == Gdiplus::Ok;
+    return ready;
+}
+
+/// 把一块 DC 区域清成「完全透明」（alpha = 0）。
+///
+/// 普通 GDI 做不到这件事：FillRect 只写 RGB，alpha 通道要么保持原样、要么被系统当成
+/// 不透明。GDI+ 的 SourceCopy 组合模式是唯一能把 alpha 一并写进重定向位图的路子；
+/// 用 FillRectangle 而不是 Clear，是为了只碰这一块（Clear 会清整个绘制表面）。
+void clear_to_transparent(HDC dc, const RECT& area) {
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+    Gdiplus::SolidBrush transparent(Gdiplus::Color(0, 0, 0, 0));
+    graphics.FillRectangle(&transparent, static_cast<INT>(area.left), static_cast<INT>(area.top),
+                           static_cast<INT>(area.right - area.left), static_cast<INT>(area.bottom - area.top));
+}
+
 /// 逻辑基准里的子区域（dp）。
 constexpr int kMargin = 18;
 constexpr int kButtonHeight = 26;
 
 HBRUSH create_solid_brush(COLORREF color) {
     return ::CreateSolidBrush(color);
+}
+
+/// 系统库存画刷（COLOR_WINDOW+1 这类）不能 DeleteObject。nullptr 也当作「没有」。
+bool is_stock_brush(HBRUSH brush) {
+    return brush == nullptr || brush == reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+}
+
+/// 只读编辑框也会收到 WM_CTLCOLORSTATIC，所以「透明背景」这条要按控件类区分：
+/// 编辑框是可滚动的内容区，需要自己的底色；静态文本才是直接画在材质上的那类。
+bool is_edit_class(HWND control) {
+    if (control == nullptr) {
+        return false;
+    }
+
+    wchar_t name[16]{};
+    constexpr int kNameLength = static_cast<int>(sizeof(name) / sizeof(name[0]));
+    if (::GetClassNameW(control, name, kNameLength) == 0) {
+        return false;
+    }
+
+    return std::wstring_view(name) == L"Edit";
+}
+
+bool high_contrast_enabled() {
+    HIGHCONTRASTW contrast{};
+    contrast.cbSize = sizeof(contrast);
+    if (::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) == FALSE) {
+        return false;
+    }
+
+    return (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
 }
 
 COLORREF read_apps_use_light_theme() {
@@ -46,6 +121,67 @@ COLORREF read_apps_use_light_theme() {
                                           L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
                                           L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
     return (status == ERROR_SUCCESS && value == 0) ? 0 : 1;
+}
+
+/// 把一行诊断写到**父进程的控制台**（只有在终端里运行时才看得见），然后立刻返回。
+///
+/// 为什么不用 MessageBox：本程序的「这是 CLI 子命令」错误几乎只会在一种情况下出现 ——
+/// 有人把提权助手指到了 GUI，而助手是用 SW_HIDE 拉起的。模态框在那里就是一个
+/// 看不见、又永不消失的窗口，会把父进程的等待硬生生拖到超时。
+void write_to_parent_console(const std::wstring& text) {
+    ::OutputDebugStringW((text + L"\n").c_str());
+
+    if (::AttachConsole(ATTACH_PARENT_PROCESS) == FALSE) {
+        return;
+    }
+
+    const HANDLE output = ::GetStdHandle(STD_ERROR_HANDLE);
+    if (output != nullptr && output != INVALID_HANDLE_VALUE) {
+        std::wstring line = text + L"\r\n";
+        DWORD written = 0;
+        ::WriteConsoleW(output, line.c_str(), static_cast<DWORD>(line.size()), &written, nullptr);
+    }
+
+    ::FreeConsole();
+}
+
+/// 深色模式下重画复选框的文字，保留主题画出来的勾选框（NM_CUSTOMDRAW）。
+///
+/// 为什么不能只靠 WM_CTLCOLORBTN：带视觉样式的按钮类在画文字时用的是主题颜色，
+/// 父窗口返回的字体/颜色会被忽略（实测深色底上仍是黑字）。自定义绘制的官方钩子是
+/// NM_CUSTOMDRAW；这里只接管 CDDS_PREPAINT，把文字按主题色再画一遍。
+LRESULT draw_dark_checkbox(const NMCUSTOMDRAW& draw, COLORREF text_color) {
+    const HWND control = draw.hdr.hwndFrom;
+    ::SetBkMode(draw.hdc, TRANSPARENT);
+    ::SetTextColor(draw.hdc, ::IsWindowEnabled(control) != FALSE ? text_color
+                                                                  : ::GetSysColor(COLOR_GRAYTEXT));
+
+    // 主题勾选框的宽度随 DPI 变化；左侧留出「勾选框 + 间隙」再开始画文字。
+    const int dpi = ::GetDpiForWindow(control);
+    RECT text_rect = draw.rc;
+    text_rect.left += ::MulDiv(20, dpi == 0 ? 96 : dpi, 96);
+
+    const int length = ::GetWindowTextLengthW(control);
+    std::wstring label(static_cast<size_t>(length) + 1, L'\0');
+    ::GetWindowTextW(control, label.data(), length + 1);
+    label.resize(static_cast<size_t>(length));
+
+    ::DrawTextW(draw.hdc, label.c_str(), static_cast<int>(label.size()), &text_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    if (::GetFocus() == control) {
+        RECT focus = text_rect;
+        ::DrawTextW(draw.hdc, label.c_str(), static_cast<int>(label.size()), &focus,
+                    DT_CALCRECT | DT_LEFT | DT_SINGLELINE);
+        text_rect.right = text_rect.left + (focus.right - focus.left) + 2;
+        text_rect.top += 2;
+        text_rect.bottom -= 2;
+        ::DrawFocusRect(draw.hdc, &text_rect);
+    }
+
+    // 主题已经画过勾选框；默认的「再画一遍文字」必须跳过，否则黑字会盖在
+    // 我们刚画的白字上面。
+    return CDRF_SKIPDEFAULT;
 }
 
 }  // namespace
@@ -67,12 +203,28 @@ int run(void* instance, const wchar_t* command_line) {
 
     const CommandLine parsed = parse_command_line(command_line == nullptr ? L"" : command_line);
 
+    // ---- GUI 不实现的 CLI 子命令：立刻失败，绝不当容器路径 ----
+    // 这些子命令（cert-add / cert-remove / list / verify / repair / clean）只有
+    // msixpkg-native.exe 实现。把它们当容器路径会一路走到下面的单实例交接：
+    // 给已有窗口发 WM_COPYDATA —— 而那个窗口可能正卡在等这次「提权」返回
+    // （UI 线程等编排线程、编排线程等子进程、子进程等 UI 线程），三方互等就死锁了。
+    if (!parsed.unsupported_subcommand.empty()) {
+        // **不用 MessageBox**：这条路最可能是「提权助手指到了 GUI」，而助手是用
+        // SW_HIDE 拉起的 —— 一个看不见的模态框会把它变成永不返回的子进程。
+        // 从终端运行时把原因写到父控制台；其余场合只在调试器里可见。
+        const std::wstring message =
+            strings.text(IDS_ERR_NOT_A_GUI_COMMAND) + L" (" + parsed.unsupported_subcommand + L")";
+        write_to_parent_console(message);
+        return exit_code::kUsage;
+    }
+
     // ---- 单实例 ----
     // Global\ 前缀是有意的：证书存储是机器级的，同一台机器上两个会话同时装同一张
     // 证书会互相覆盖「导入前是否已存在」的判定，而那条判定决定卸载时有没有资格回收。
     HANDLE instance_mutex = ::CreateMutexW(nullptr, FALSE, kSingleInstanceMutex);
     const bool already_running = instance_mutex != nullptr && ::GetLastError() == ERROR_ALREADY_EXISTS;
     if (already_running) {
+        int result = exit_code::kSuccess;
         HWND existing = ::FindWindowW(kWindowClass, nullptr);
         if (existing != nullptr) {
             ::SetForegroundWindow(existing);
@@ -86,7 +238,19 @@ int run(void* instance, const wchar_t* command_line) {
                 data.dwData = kCopyDataMagic;
                 data.cbData = static_cast<DWORD>((path.size() + 1) * sizeof(wchar_t));
                 data.lpData = const_cast<wchar_t*>(path.c_str());
-                ::SendMessageW(existing, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data));
+
+                // 必须带超时：对端要是卡住了，第二个实例不能跟着一起卡死。
+                // SMTO_ABORTIFHUNG 让「对端已无响应」立刻返回 0；BUSY 表示对端正在
+                // 装东西、明确拒绝接手（kCopyDataBusy 以前定义了却没人回）。
+                DWORD_PTR reply = 0;
+                const LRESULT delivered = ::SendMessageTimeoutW(
+                    existing, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK, kCopyDataTimeoutMs, &reply);
+                if (delivered == 0 || reply == kCopyDataBusy) {
+                    ::MessageBoxW(nullptr, strings.get(IDS_PROGRESS_BUSY).data(),
+                                  strings.get(IDS_PROGRESS_TITLE).data(), MB_OK | MB_ICONINFORMATION);
+                    result = exit_code::kPrecondition;
+                }
             }
         }
 
@@ -94,7 +258,7 @@ int run(void* instance, const wchar_t* command_line) {
             ::CloseHandle(instance_mutex);
         }
 
-        return exit_code::kSuccess;
+        return result;
     }
 
     WNDCLASSEXW window_class{};
@@ -125,7 +289,12 @@ int run(void* instance, const wchar_t* command_line) {
         return exit_code::kUnexpected;
     }
 
-    wizard.show(parsed.container.wstring(), parsed.manage);
+    if (parsed.uninstall) {
+        // ARP 的 UninstallString 走这里：`<安装器> uninstall --family-name <PFN>`。
+        wizard.show_uninstall(parsed.uninstall_family_name, parsed.uninstall_install_id);
+    } else {
+        wizard.show(parsed.container.wstring(), parsed.manage);
+    }
 
     MSG message{};
     while (::GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -175,13 +344,7 @@ Wizard::~Wizard() {
         ::DeleteObject(font_body_);
     }
 
-    if (brush_background_ != nullptr && brush_background_ != reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1)) {
-        ::DeleteObject(brush_background_);
-    }
-
-    if (brush_edit_ != nullptr && brush_edit_ != reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1)) {
-        ::DeleteObject(brush_edit_);
-    }
+    release_brushes();
 
     if (hwnd_ != nullptr && ::IsWindow(hwnd_) != FALSE) {
         ::DestroyWindow(hwnd_);
@@ -215,6 +378,9 @@ void Wizard::show(const std::wstring& container, bool manage) {
     ::ShowWindow(hwnd_, SW_SHOWNORMAL);
     ::UpdateWindow(hwnd_);
 
+    // 材质要在窗口上屏之后再申请：DWM 只会为已经显示的窗口建立合成表面。
+    apply_backdrop();
+
     if (manage) {
         // --manage：管理页是入口，不参与安装流程。
         show_page(WizardPage::Manage);
@@ -235,6 +401,24 @@ void Wizard::show(const std::wstring& container, bool manage) {
 
     show_page(WizardPage::Summary);
     render_page();
+}
+
+void Wizard::show_uninstall(const std::wstring& family_name, const std::wstring& install_id) {
+    ::ShowWindow(hwnd_, SW_SHOWNORMAL);
+    ::UpdateWindow(hwnd_);
+    apply_backdrop();
+
+    if (family_name.empty() && install_id.empty()) {
+        // 没有目标 = 用法错误（ARP 一定会带 --family-name）。用退出码 3 说清楚，
+        // 而不是打开一个什么都干不了的窗口。
+        exit_code_.store(exit_code::kUsage);
+        ::MessageBoxW(hwnd_, strings_.get(IDS_MANAGE_NO_SELECTION).data(), strings_.get(IDS_MANAGE_TITLE).data(),
+                      MB_OK | MB_ICONWARNING);
+        ::DestroyWindow(hwnd_);
+        return;
+    }
+
+    begin_uninstall_for(narrow_utf8(install_id), family_name);
 }
 
 LRESULT CALLBACK Wizard::window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -269,6 +453,14 @@ LRESULT Wizard::handle(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
             return on_notify(reinterpret_cast<NMHDR*>(lparam));
 
         case WM_DROPFILES: {
+            // 装东西的时候不接手新容器：adopt_container() 会先把正在跑的任务停干净，
+            // 而那是**在 UI 线程上等**编排线程 —— 安装中就是几十秒到几分钟的假死。
+            if (worker_.busy()) {
+                ::DragFinish(reinterpret_cast<HDROP>(wparam));
+                ::MessageBeep(MB_ICONWARNING);
+                return 0;
+            }
+
             // 拖放：只接受一个文件。载入后直接跳同意页（摘要页仍可点「上一步」回看）。
             const HDROP drop = reinterpret_cast<HDROP>(wparam);
             const UINT count = ::DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
@@ -295,11 +487,21 @@ LRESULT Wizard::handle(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
             return on_ctl_color(message, reinterpret_cast<HDC>(wparam), reinterpret_cast<HWND>(lparam));
 
         case WM_ERASEBKGND: {
+            HDC dc = reinterpret_cast<HDC>(wparam);
             RECT client{};
             ::GetClientRect(hwnd, &client);
-            ::FillRect(reinterpret_cast<HDC>(wparam), &client, brush_background_);
+
+            if (backdrop_) {
+                // 只清 alpha。铺任何颜色都会把材质盖住；DWM 自己会在底下画材质，
+                // 窗口失焦时它还会自动换成 SolidBackgroundFillColorBase 的纯色兜底。
+                clear_to_transparent(dc, client);
+                return 1;
+            }
+
+            ::FillRect(dc, &client, brush_background_);
             return 1;
         }
+
 
         case WM_PAINT: {
             // 控件已经把自己画好了；这里只是为了「满足」系统的绘制请求，
@@ -323,6 +525,26 @@ LRESULT Wizard::handle(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
 
         case kMsgProgress:
             if (page_ == WizardPage::Progress) {
+                // 提权马上发生（编排线程正要拉起 runas 助手）：把自己摆到前台并闪一下任务栏。
+                // 本机策略 `ConsentPromptBehaviorAdmin = 0` 时根本不会有 UAC 窗口（静默提权）；
+                // 而策略把确认框放在普通桌面（PromptOnSecureDesktop = 0）时，确认窗口
+                // 可能开在我们后面 —— 用户就会以为「什么都没有发生，卡住了」。
+                bool waiting = false;
+                {
+                    const std::lock_guard<std::mutex> guard(shared_->mutex);
+                    waiting = shared_->waiting_for_elevation;
+                }
+
+                if (waiting && !elevation_foregrounded_) {
+                    elevation_foregrounded_ = true;
+                    ::SetForegroundWindow(hwnd_);
+                    FLASHWINFO flash{};
+                    flash.cbSize = sizeof(flash);
+                    flash.hwnd = hwnd_;
+                    flash.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
+                    ::FlashWindowEx(&flash);
+                }
+
                 render_progress();
             }
 
@@ -489,11 +711,8 @@ void Wizard::apply_theme() {
         ::DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     }
 
-    // Mica：Win11 才认；圆角同理。两者都失败就退化到纯色 + 直角。
-    DWORD backdrop = kBackdropMainWindow;
-    const HRESULT backdrop_result =
-        ::DwmSetWindowAttribute(hwnd_, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
-
+    // Mica 不在 WM_CREATE 里申请：统一由 apply_backdrop 在窗口上屏后处理（失败要整体
+    // 回退纯色，放在这里会变成「属性设了、但没人负责后面的透明清底」的半套状态）。
     DWORD corner = kCornerRound;
     const DWORD corner_size = sizeof(corner);
     const HRESULT corner_result = ::DwmGetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, corner_size);
@@ -502,17 +721,22 @@ void Wizard::apply_theme() {
         ::DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
     }
 
-    (void)backdrop_result;
-
     if (dark_) {
         color_background_ = RGB(0x20, 0x20, 0x20);
         color_text_ = RGB(0xF0, 0xF0, 0xF0);
-        brush_background_ = create_solid_brush(color_background_);
-        // 只读编辑框也会收到 WM_CTLCOLORSTATIC，所以它跟背景同色才不刺眼。
-        brush_edit_ = brush_background_;
     } else {
         color_background_ = ::GetSysColor(COLOR_WINDOW);
         color_text_ = ::GetSysColor(COLOR_WINDOWTEXT);
+    }
+
+    // apply_theme 可能被调用多次（WM_CREATE 后 create() 还会补一次），先放掉上一次的
+    // 画刷，否则每调一次就漏一个 GDI 对象。
+    release_brushes();
+    if (dark_) {
+        // 只读编辑框也会收到 WM_CTLCOLORSTATIC，所以它跟背景同色才不刺眼。
+        brush_edit_ = create_solid_brush(color_background_);
+        brush_background_ = brush_edit_;
+    } else {
         brush_background_ = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);  // 系统画刷，不删
         brush_edit_ = brush_background_;
     }
@@ -521,6 +745,64 @@ void Wizard::apply_theme() {
     // 只用 comctl32 自己的消息（LVM_SET*COLOR），不引入 uxtheme —— 依赖面保持在
     // 设计文档列出的那几个 DLL 内。
     apply_list_colors();
+}
+
+void Wizard::release_brushes() {
+    HBRUSH background = brush_background_;
+    HBRUSH edit = brush_edit_;
+    brush_background_ = nullptr;
+    brush_edit_ = nullptr;
+
+    if (!is_stock_brush(background)) {
+        ::DeleteObject(background);
+    }
+
+    // 深色模式下两个成员是同一个对象，只删一次。
+    if (!is_stock_brush(edit) && edit != background) {
+        ::DeleteObject(edit);
+    }
+}
+
+void Wizard::apply_backdrop() {
+    backdrop_ = false;
+
+    if (hwnd_ == nullptr) {
+        return;
+    }
+
+    // 高对比度下 DWM 用系统配色顶替材质：浅色的高对比主题里底色可能是白的，
+    // 而这里的文字颜色是按深色主题写死的，会变成白底白字。宁可不启用材质。
+    if (high_contrast_enabled()) {
+        return;
+    }
+
+    DWORD backdrop = kBackdropMainWindow;
+    if (FAILED(::DwmSetWindowAttribute(hwnd_, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop)))) {
+        return;  // Win10 / Win11 22621 之前：不认系统背景材质，回落纯色。
+    }
+
+    BOOL alpha = TRUE;
+    if (FAILED(::DwmSetWindowAttribute(hwnd_, kRedirectionBitmapAlpha, &alpha, sizeof(alpha)))) {
+        // Win11 22621–26099：认材质，但不认「重定向位图带 alpha」。这时候客户区
+        // 无法透出材质（硬开会变成一层白色玻璃），宁可保持纯色。
+        return;
+    }
+
+    // 打开 alpha 之后，客户区里没被写成不透明的像素会透出材质 —— 那正是我们要的，
+    // 但前提是画底色时真的会写 alpha=0，而这件事只有 GDI+ 做得到。
+    if (!ensure_gdiplus()) {
+        return;
+    }
+
+    MARGINS margins{-1, -1, -1, -1};
+    if (FAILED(::DwmExtendFrameIntoClientArea(hwnd_, &margins))) {
+        return;
+    }
+
+    backdrop_ = true;
+
+    // 客户区原本是不透明的底色，现在要整体重画成透明（见 WM_ERASEBKGND）。
+    ::InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
 void Wizard::apply_list_colors() {
@@ -616,12 +898,80 @@ void Wizard::layout() {
 
     for (size_t index = 0; index < controls_.size(); ++index) {
         const ControlSpec& spec = control_layout()[index];
+        // 同意页的控件按「可见性」纵向回流（见 layout_consent）：它比固定坐标多一层
+        // 逻辑，不能让后面的通用摆放再把它覆盖回静态位置。
+        if (spec.group == PageLayout::Consent) {
+            continue;
+        }
+
         if (spec.group != PageLayout::Shell && spec.group != current) {
             continue;
         }
 
         ::SetWindowPos(controls_[index], nullptr, scale(spec.x), scale(spec.y), scale(spec.width),
                        scale(spec.height), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    if (current == PageLayout::Consent) {
+        layout_consent();
+    }
+}
+
+void Wizard::move_control(int id, int x, int y, int width, int height) {
+    const auto position = std::find(ids_.begin(), ids_.end(), id);
+    if (position == ids_.end()) {
+        return;
+    }
+
+    ::SetWindowPos(controls_[static_cast<size_t>(position - ids_.begin())], nullptr, scale(x), scale(y),
+                   scale(width), scale(height), SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void Wizard::layout_consent() {
+    // 固定区域（证书详情 + 警告）仍以控件表为准；复选框区按可见性纵向回流。
+    // 不这样做时，「我了解并同意」与「同时让本机所有用户都可用」之间会出现
+    // 一百多 dp 的空白（截图里那两个孤零零的复选框就是这么来的）。
+    const auto spec_of = [](int id) -> const ControlSpec* {
+        for (const ControlSpec& spec : control_layout()) {
+            if (spec.id == id) {
+                return &spec;
+            }
+        }
+
+        return nullptr;
+    };
+
+    const ControlSpec* details = spec_of(IDC_CONSENT_DETAILS);
+    const ControlSpec* warning = spec_of(IDC_CONSENT_WARNING);
+    const ControlSpec* accept = spec_of(IDC_CONSENT_ACCEPT);
+    const ControlSpec* trust = spec_of(IDC_CONSENT_TRUST_PUBLISHER);
+    const ControlSpec* unpinned = spec_of(IDC_CONSENT_UNPINNED_WARNING);
+    const ControlSpec* all_users = spec_of(IDC_CONSENT_ALL_USERS);
+    if (details == nullptr || warning == nullptr || accept == nullptr || trust == nullptr ||
+        unpinned == nullptr || all_users == nullptr) {
+        return;
+    }
+
+    move_control(details->id, details->x, details->y, details->width, details->height);
+    move_control(warning->id, warning->x, warning->y, warning->width, warning->height);
+
+    constexpr int kGap = 8;
+    int y = accept->y;
+    move_control(accept->id, accept->x, y, accept->width, accept->height);
+    y += accept->height + kGap;
+
+    if (is_visible(trust->id)) {
+        move_control(trust->id, trust->x, y, trust->width, trust->height);
+        y += trust->height + kGap;
+    }
+
+    if (is_visible(unpinned->id)) {
+        move_control(unpinned->id, unpinned->x, y, unpinned->width, unpinned->height);
+        y += unpinned->height + kGap;
+    }
+
+    if (is_visible(all_users->id)) {
+        move_control(all_users->id, all_users->x, y, all_users->width, all_users->height);
     }
 }
 
@@ -656,7 +1006,9 @@ void Wizard::set_text(int id, std::wstring_view text) {
         return;
     }
 
-    ::SetWindowTextW(controls_[static_cast<size_t>(position - ids_.begin())], text.data());
+    const HWND control = controls_[static_cast<size_t>(position - ids_.begin())];
+    ::SetWindowTextW(control, text.data());
+    repaint_behind(control);
 }
 
 void Wizard::set_visible(int id, bool visible) {
@@ -665,7 +1017,26 @@ void Wizard::set_visible(int id, bool visible) {
         return;
     }
 
-    ::ShowWindow(controls_[static_cast<size_t>(position - ids_.begin())], visible ? SW_SHOW : SW_HIDE);
+    const HWND control = controls_[static_cast<size_t>(position - ids_.begin())];
+    ::ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
+    repaint_behind(control);
+}
+
+void Wizard::repaint_behind(HWND control) {
+    // 材质生效时子控件的背景是透明的：控件自己重画不会擦掉上一次留下的字形，
+    // 必须让父窗口先把那块区域重新清成 alpha=0（材质透出来），子控件再画一遍。
+    // 少了这一步的典型症状：换了文案的静态文本新旧两行叠在一起。
+    if (!backdrop_ || control == nullptr || hwnd_ == nullptr) {
+        return;
+    }
+
+    RECT rect{};
+    if (::GetWindowRect(control, &rect) == FALSE) {
+        return;
+    }
+
+    ::MapWindowPoints(HWND_DESKTOP, hwnd_, reinterpret_cast<POINT*>(&rect), 2);
+    ::RedrawWindow(hwnd_, &rect, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
 bool Wizard::is_visible(int id) const {
@@ -704,7 +1075,16 @@ int Wizard::selected_row() const {
 }
 
 LRESULT Wizard::on_ctl_color(UINT message, HDC dc, HWND control) {
-    (void)control;
+    // 材质生效时静态文本直接画在材质上：给它铺一块不透明底色，等于把 Mica 又盖回去
+    // （每个标签变成一条纯色横条）。这里交回空心画刷 + 透明背景模式，只画字形。
+    //
+    // 只读编辑框也走 WM_CTLCOLORSTATIC，但它是可滚动的内容区：透明背景在滚动时
+    // 会留下残影，所以按控件类把它排除在外，继续用不透明的底色。
+    if (backdrop_ && message == WM_CTLCOLORSTATIC && !is_edit_class(control)) {
+        ::SetTextColor(dc, color_text_);
+        ::SetBkMode(dc, TRANSPARENT);
+        return reinterpret_cast<LRESULT>(::GetStockObject(HOLLOW_BRUSH));
+    }
 
     if (!dark_) {
         // 浅色模式交给系统处理：它知道编辑框 / 静态文本 / 列表的默认配色，
@@ -714,7 +1094,7 @@ LRESULT Wizard::on_ctl_color(UINT message, HDC dc, HWND control) {
 
     ::SetTextColor(dc, color_text_);
     ::SetBkColor(dc, color_background_);
-    return reinterpret_cast<LRESULT>(brush_background_);
+    return reinterpret_cast<LRESULT>(brush_edit_);
 }
 
 // ============================================================================
@@ -1418,6 +1798,23 @@ LRESULT Wizard::on_notify(NMHDR* header) {
         return 0;
     }
 
+    // 带主题的复选框由 comctl32 自己画文字，WM_CTLCOLOR* 的 SetTextColor 对它无效
+    // （深色模式下就是深底黑字）。NM_CUSTOMDRAW 是官方给出的改写点：保留主题画出来的
+    // 勾选框，只把文字换成跟随主题的颜色。浅色模式不接管，避免破坏系统默认状态。
+    if (header->code == NM_CUSTOMDRAW && dark_) {
+        const LONG_PTR style = header->hwndFrom != nullptr ? ::GetWindowLongPtrW(header->hwndFrom, GWL_STYLE) : 0;
+        // 复选框的文字由主题画成黑色，且 WM_CTLCOLOR* 改不动它；这里只接管这一类控件，
+        // 普通按钮、进度条、列表的 NM_CUSTOMDRAW 仍旧走默认实现。
+        if ((style & BS_TYPEMASK) == BS_AUTOCHECKBOX) {
+            auto* draw = reinterpret_cast<NMCUSTOMDRAW*>(header);
+            if (draw->dwDrawStage == CDDS_PREPAINT) {
+                return draw_dark_checkbox(*draw, color_text_);
+            }
+
+            return CDRF_DODEFAULT;
+        }
+    }
+
     if (header->hwndFrom == list_view_ && header->code == LVN_ITEMCHANGED) {
         enable(IDC_MANAGE_UNINSTALL, selected_row() >= 0);
         return 0;
@@ -1442,6 +1839,13 @@ LRESULT Wizard::on_copy_data(const COPYDATASTRUCT* data) {
 
     if (container.empty()) {
         return TRUE;
+    }
+
+    // 装东西的时候绝不能在这里等编排线程：发送方是同步 SendMessage，它要等我们
+    // 返回；而我们要等编排线程；编排线程可能正等着那个发送方退出 —— 三方互等。
+    // 回 BUSY 让发送方立刻知道结果（它自己会提示用户、并以 kPrecondition 退出）。
+    if (worker_.busy()) {
+        return static_cast<LRESULT>(kCopyDataBusy);
     }
 
     adopt_container(container);
@@ -1479,6 +1883,7 @@ void Wizard::begin_preview(const std::wstring& container) {
         shared_->phase = PhaseView::Idle;
         shared_->waiting_for_elevation = false;
         shared_->phase_log.clear();
+        shared_->preapproved_consent.reset();
     }
 
     // 换容器就把上一次的结论清掉：新的一次载入会自己给出退出码
@@ -1494,7 +1899,7 @@ void Wizard::adopt_container(const std::wstring& container) {
     dropped_in_ = true;
 }
 
-void Wizard::begin_install() {
+void Wizard::begin_install(const ConsentAnswers& answers) {
     {
         const std::lock_guard<std::mutex> guard(shared_->mutex);
         shared_->install = InstallView{};
@@ -1502,9 +1907,13 @@ void Wizard::begin_install() {
         shared_->phase = PhaseView::Validate;
         shared_->waiting_for_elevation = false;
         shared_->phase_log.clear();
+        // 先放进信箱再启动线程：编排线程可能在 UI 还没返回时就已经走到 Ask。
+        // GuiConsent::Ask 会优先消费它，因此同意页不会被第二次推上来。
+        shared_->preapproved_consent = answers;
     }
 
     installing_ = true;
+    elevation_foregrounded_ = false;
     show_page(WizardPage::Progress);
     render_page();
     start_install(worker_, hwnd_);
@@ -1518,11 +1927,21 @@ void Wizard::submit_consent(bool approved) {
     }
 
     if (pending == nullptr) {
-        // 没有待决问题（例如编排线程已经自己退出了）：直接按用户的意图走。
+        // 没有待决问题（例如用户是在摘要页按「下一步」直接走到这里的）：
+        // 把这次决定随安装线程一起带过去，而不是先启动安装、再由安装线程
+        // 发一次同意请求 —— 那正是「要点两次下一步」的来源。
         if (!approved) {
+            {
+                const std::lock_guard<std::mutex> guard(shared_->mutex);
+                shared_->preapproved_consent.reset();
+            }
             exit_code_.store(exit_code::kCancelled);
         } else {
-            begin_install();
+            ConsentAnswers answers;
+            answers.approved = is_checked(IDC_CONSENT_ACCEPT);
+            answers.remember_publisher = is_checked(IDC_CONSENT_TRUST_PUBLISHER);
+            answers.all_users = is_checked(IDC_CONSENT_ALL_USERS);
+            begin_install(answers);
         }
 
         return;
@@ -1594,6 +2013,10 @@ void Wizard::begin_uninstall() {
     }
 
     const ManageEntry& entry = view.entries[static_cast<size_t>(row)];
+    begin_uninstall_for(entry.install_id, entry.name);
+}
+
+void Wizard::begin_uninstall_for(const std::string& install_id, const std::wstring& family_name) {
     {
         const std::lock_guard<std::mutex> guard(shared_->mutex);
         shared_->install = InstallView{};
@@ -1604,9 +2027,10 @@ void Wizard::begin_uninstall() {
     }
 
     installing_ = false;
+    elevation_foregrounded_ = false;
     show_page(WizardPage::Progress);
     render_page();
-    start_uninstall(worker_, hwnd_, entry.install_id, entry.name);
+    start_uninstall(worker_, hwnd_, install_id, family_name);
 }
 
 void Wizard::open_log_file() {
