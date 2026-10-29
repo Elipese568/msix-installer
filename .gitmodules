@@ -1,4 +1,4 @@
 [submodule "src/MsixpkgInstaller.Native/gui/ui"]
 	path = src/MsixpkgInstaller.Native/gui/ui
-	url = D:/work/source/repos/Wren.git
+	url = git@github.com:Elipese568/wren.git
 	branch = main
