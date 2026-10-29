@@ -104,7 +104,8 @@ struct DemoApp {
     int progress_value = 0;
     float progress_accum = 0.0f;
     bool installing = false;
-    ULONGLONG last_tick = 0;
+    int animation_interval_ms = 0;  // 0 = 跟随刷新率
+    std::chrono::steady_clock::time_point last_tick{};
 
     void refresh_badge() {
         if (host == nullptr || badge == nullptr) {
@@ -131,7 +132,7 @@ struct DemoApp {
         installing = true;
         progress_value = 0;
         progress_accum = 0.0f;
-        last_tick = 0;
+        last_tick = {};
         if (progress != nullptr) {
             progress->set_value(0);
         }
@@ -148,8 +149,9 @@ struct DemoApp {
         set_status(L"正在校验容器 …");
 
         // 只在安装期间跑帧；空闲时窗口不重绘，CPU 占用回到 0。
+        // interval 0 = 每个合成器 tick 一帧；--fps 60 可以主动限到 60fps。
         if (host != nullptr) {
-            host->set_animating(true, 16);
+            host->set_animating(true, animation_interval_ms);
         }
     }
 
@@ -171,7 +173,7 @@ struct DemoApp {
         installing = false;
         progress_value = 0;
         progress_accum = 0.0f;
-        last_tick = 0;
+        last_tick = {};
         if (host != nullptr) {
             host->set_animating(false);
         }
@@ -221,15 +223,19 @@ struct DemoApp {
             return;
         }
 
-        const ULONGLONG now = ::GetTickCount64();
-        const float dt = last_tick == 0 ? 0.0f : static_cast<float>(now - last_tick) / 1000.0f;
+        // 用 QPC 而不是 GetTickCount64：180Hz 下一帧只有 5.5ms，后者的 15.6ms
+        // 粒度会让动画每帧步长在 0/15ms 之间跳。
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = last_tick == std::chrono::steady_clock::time_point{}
+                              ? 0.0
+                              : std::chrono::duration<double>(now - last_tick).count();
         last_tick = now;
 
-        // 浮点累加再取整：60fps 下每帧增量不到 1%，直接取整会永远停在 0%。
-        progress_accum = std::min(100.0f, progress_accum + dt * 26.0f);
+        // 浮点累加：进度条按亚百分比平滑移动，百分比文字仍取整数。
+        progress_accum = std::min(100.0f, progress_accum + static_cast<float>(dt) * 26.0f);
         progress_value = static_cast<int>(progress_accum);
         if (progress != nullptr) {
-            progress->set_value(progress_value);
+            progress->set_value_f(progress_accum);
         }
 
         if (percent != nullptr) {
@@ -379,6 +385,7 @@ struct Settings {
     std::wstring theme = L"auto";
     std::wstring material = L"auto";
     std::wstring presenter;  // gpu / gdi / layered；空 = 默认（GPU 优先）
+    int fps = 0;             // 0 = 跟随刷新率；正数 = 限帧
     bool auto_start = false;
     ULONGLONG exit_after_ms = 0;
 };
@@ -407,6 +414,10 @@ Settings parse_settings() {
             next(settings.material);
         } else if (token == L"--presenter") {
             next(settings.presenter);
+        } else if (token == L"--fps") {
+            std::wstring value;
+            next(value);
+            settings.fps = static_cast<int>(_wtoi(value.c_str()));
         } else if (token == L"--auto") {
             settings.auto_start = true;
         } else if (token == L"--exit-after") {
@@ -604,6 +615,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     app.host = nullptr;
     Host host;
     app.host = &host;
+    app.animation_interval_ms = settings.fps > 0 ? 1000 / settings.fps : 0;
 
     if (!host.create(instance, std::move(root), options)) {
         ::MessageBoxW(nullptr, L"窗口创建失败。", L"自绘 UI Demo", MB_OK | MB_ICONERROR);

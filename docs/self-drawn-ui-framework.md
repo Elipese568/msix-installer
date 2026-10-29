@@ -267,9 +267,11 @@ screen.DrawImage(frame.bitmap(), 0, 0);
 > `CopyResource` 到 back buffer 后 `Present(1)` + `Commit`。`CreateSwapChainForHwnd`
 > 不接受 `DXGI_ALPHA_MODE_PREMULTIPLIED`（实测 `DXGI_ERROR_INVALID_CALL`），
 > 所以带 alpha 的交换链不能省掉 DComp。Host 用
-> `DCompositionWaitForCompositorClock` 驱动动画，并把 60fps 折算成「每 N 个
-> 合成 tick 一帧」；空闲时完全不跑帧。GDI+ DIB + `SourceCopy` 保留为回退。
-> 760×620 实测：paint 从 ~14ms 降到 <0.2ms，动画期 CPU 从 ~70% 降到 ~20%。
+> `DCompositionWaitForCompositorClock` 驱动动画：`set_animating(true, 0)` 每个
+> 合成 tick 出一帧（180Hz 屏即 180fps），给正数才按周期折算成每 N tick 一帧；
+> 空闲时完全不跑帧。GDI+ DIB + `SourceCopy` 保留为回退。
+> 760×620 实测：paint 从 ~14ms 降到 <0.1ms；跟随刷新率 180fps 时 CPU ~31–38%，
+> 限到 60fps 时 CPU ~10–21%。
 
 ### 3.3 文字
 

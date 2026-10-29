@@ -1,4 +1,4 @@
-﻿#include "controls.h"
+#include "controls.h"
 
 #include "host.h"
 #include "theme.h"
@@ -399,16 +399,26 @@ ProgressBar::ProgressBar() {
 }
 
 void ProgressBar::set_value(int percent) {
-    const int clamped = std::clamp(percent, 0, 100);
-    if (clamped == value_) {
+    set_value_f(static_cast<float>(std::clamp(percent, 0, 100)));
+}
+
+void ProgressBar::set_value_f(float percent) {
+    const float clamped = std::clamp(percent, 0.0f, 100.0f);
+    const int whole = static_cast<int>(clamped);
+    if (std::abs(clamped - value_f_) < 0.01f && whole == value_) {
         return;
     }
 
-    value_ = clamped;
-    invalidate();
-    if (host != nullptr) {
-        host->notify_accessible(this, EVENT_OBJECT_VALUECHANGE);
+    value_f_ = clamped;
+    if (whole != value_) {
+        value_ = whole;
+        // 无障碍只按整数百分比报告，避免每帧发一次 ValueChange 事件。
+        if (host != nullptr) {
+            host->notify_accessible(this, EVENT_OBJECT_VALUECHANGE);
+        }
     }
+
+    invalidate();
 }
 
 void ProgressBar::set_marquee(bool marquee) {
@@ -440,8 +450,8 @@ void ProgressBar::paint(Canvas& canvas) {
         return;
     }
 
-    const float width = bounds.width * static_cast<float>(value_) / 100.0f;
-    if (value_ > 0 && width > 0.0f) {
+    const float width = bounds.width * value_f_ / 100.0f;
+    if (value_f_ > 0.0f && width > 0.0f) {
         const float fill_width = std::min(bounds.width, std::max(bounds.height, width));
         canvas.fill_round_rect({bounds.x, bounds.y, fill_width, bounds.height}, radius, current.progress_fill);
     }

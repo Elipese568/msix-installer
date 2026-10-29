@@ -247,11 +247,13 @@ int Host::run() {
 
             if (animating_) {
                 ++clock_ticks_;
+                // interval <= 0：每个合成 tick 都出一帧（180Hz 屏就是 180fps）。
+                // 正数则折算成「每 N 个 tick 一帧」。
                 const int ticks_needed =
-                    clock_period_ms_ > 0.5
-                        ? std::max(1, static_cast<int>(std::lround(
-                                          static_cast<double>(animation_interval_ms_) / clock_period_ms_)))
-                        : 1;
+                    (animation_interval_ms_ <= 0 || clock_period_ms_ <= 0.5)
+                        ? 1
+                        : std::max(1, static_cast<int>(std::lround(
+                                           static_cast<double>(animation_interval_ms_) / clock_period_ms_)));
 
                 if (clock_ticks_ >= ticks_needed) {
                     clock_ticks_ = 0;
@@ -664,9 +666,11 @@ double Host::now_ms() {
 void Host::record_frame(double start_ms, double paint_done_ms, double raster_done_ms, double end_ms) {
     ++frames_rendered_;
 
-    if (last_frame_start_ms_ > 0.0) {
+    if (last_frame_start_ms_ > 0.0 && frames_rendered_ > 5) {
         const double interval = start_ms - last_frame_start_ms_;
-        if (animating_ && interval > 25.0 && interval < 250.0) {
+        const double expected = animation_interval_ms_ > 0 ? static_cast<double>(animation_interval_ms_)
+                                                          : clock_period_ms_;
+        if (animating_ && expected > 0.5 && interval > expected * 1.5 && interval < 250.0) {
             ++dropped_frames_;
         }
 
@@ -703,13 +707,11 @@ FrameStats Host::frame_stats() const {
     double paint_sum = 0.0;
     double text_sum = 0.0;
     double present_sum = 0.0;
-    double interval_sum = 0.0;
     for (size_t index = 0; index < sample_count_; ++index) {
         render_sum += render_samples_[index];
         paint_sum += paint_samples_[index];
         text_sum += text_samples_[index];
         present_sum += present_samples_[index];
-        interval_sum += interval_samples_[index];
         intervals.push_back(interval_samples_[index]);
     }
 
@@ -718,14 +720,16 @@ FrameStats Host::frame_stats() const {
     stats.paint_ms = paint_sum / count;
     stats.text_ms = text_sum / count;
     stats.present_ms = present_sum / count;
-    stats.interval_ms = interval_sum / count;
 
     std::sort(intervals.begin(), intervals.end());
+    const double median = intervals[std::min(sample_count_ - 1, sample_count_ / 2)];
+    stats.interval_ms = median;
+
     const size_t p95_index = std::min(sample_count_ - 1, static_cast<size_t>(count * 0.95));
     stats.interval_p95_ms = intervals[p95_index];
 
-    if (stats.interval_ms > 0.0) {
-        stats.refresh_hz = static_cast<int>(std::lround(1000.0 / stats.interval_ms));
+    if (median > 0.0) {
+        stats.refresh_hz = static_cast<int>(std::lround(1000.0 / median));
     }
 
     return stats;
@@ -745,10 +749,11 @@ void Host::advance_animation() {
         return;
     }
 
-    const ULONGLONG now = ::GetTickCount64();
-    float dt = last_tick_ms_ == 0 ? 0.0f : static_cast<float>(now - last_tick_ms_) / 1000.0f;
+    const double now = now_ms();
+    const float dt = last_tick_ms_ > 0.0
+                         ? std::min(static_cast<float>((now - last_tick_ms_) / 1000.0), 0.25f)
+                         : 0.0f;
     last_tick_ms_ = now;
-    dt = std::min(dt, 0.25f);
 
     if (root_ != nullptr) {
         root_->tick(dt);
@@ -775,8 +780,7 @@ void Host::sync_animation_timer() {
 
     if (want_timer && !animation_timer_active_) {
         ::SetTimer(hwnd_, kAnimationTimer, static_cast<UINT>(std::max(8, animation_interval_ms_)), nullptr);
-        animation_timer_active_ = true;
-    } else if (!want_timer && animation_timer_active_) {
+        animation_timer_active_ = true;    } else if (!want_timer && animation_timer_active_) {
         ::KillTimer(hwnd_, kAnimationTimer);
         animation_timer_active_ = false;
     }
@@ -976,8 +980,9 @@ void Host::set_animating(bool animating, int interval_ms) {
     }
 
     animating_ = animating;
-    animation_interval_ms_ = std::max(8, interval_ms);
-    last_tick_ms_ = ::GetTickCount64();
+    // 0 = 跟随合成器时钟；GDI 回退没有合成器节拍，用 8ms 的 timer 近似。
+    animation_interval_ms_ = std::max(0, interval_ms);
+    last_tick_ms_ = now_ms();
     last_clock_ms_ = 0.0;
     clock_period_ms_ = 0.0;
     clock_ticks_ = 0;

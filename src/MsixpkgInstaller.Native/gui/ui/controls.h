@@ -103,7 +103,10 @@ public:
     ProgressBar();
 
     void set_value(int percent);
+    /// 亚百分比进度：高刷新率下进度条按像素平滑移动，无障碍仍按整数报告。
+    void set_value_f(float percent);
     int value() const { return value_; }
+    float value_f() const { return value_f_; }
     void set_marquee(bool marquee);
     bool marquee() const { return marquee_; }
 
@@ -114,6 +117,7 @@ public:
 
 private:
     int value_ = 0;
+    float value_f_ = 0.0f;
     bool marquee_ = false;
     float phase_ = 0.0f;
 };

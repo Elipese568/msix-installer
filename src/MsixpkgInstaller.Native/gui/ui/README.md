@@ -28,6 +28,9 @@ artifacts/ui-demo-build/Debug/msixpkg-ui-demo.exe --theme dark  --material mica
 artifacts/ui-demo-build/Debug/msixpkg-ui-demo.exe --presenter gpu
 artifacts/ui-demo-build/Debug/msixpkg-ui-demo.exe --presenter gdi
 artifacts/ui-demo-build/Debug/msixpkg-ui-demo.exe --presenter layered
+
+# 默认跟随刷新率（180Hz 屏就是 180fps）；--fps 60 可主动限帧
+artifacts/ui-demo-build/Debug/msixpkg-ui-demo.exe --fps 60
 ```
 
 demo 参数：
@@ -37,6 +40,7 @@ demo 参数：
 | `--theme light\|dark\|hc` | 强制外观；缺省 `auto`（跟随系统） |
 | `--material auto\|solid\|mica\|acrylic` | 强制材质；`auto` 依次尝试 Mica → Acrylic → Solid |
 | `--presenter gpu\|gdi\|layered` | 强制呈现后端；`gpu` 失败自动退 `gdi`（等价于环境变量 `MSIXPKG_UI_PRESENTER`） |
+| `--fps <hz>` | 动画帧率；`0`（默认）= 每个合成器 tick 一帧，即跟随刷新率 |
 | `--report <path>` | 把主题/材质/DPI、**MSAA 子对象清单**与帧统计写到文件后继续运行 |
 | `--auto` | 约 0.7s 后自动开始演示安装（用于截图/基准） |
 | `--exit-after <ms>` | 到时间自动关窗；退出前再写一次 `--report`（含最终帧统计） |
@@ -119,9 +123,10 @@ Host ── Canvas（同一套绘制动词，两套后端）
   `Present(1)` + `Commit`。Mica/Acrylic 继续从透明像素透出来。`--presenter gdi`
   或 `MSIXPKG_UI_PRESENTER=gdi` 可强制走软件路径。
 - **合成器节拍**：组合交换链的 `Present` 不做反压，Host 用
-  `DCompositionWaitForCompositorClock` 等 DWM 的合成时钟；按测得的周期把
-  60fps 折算成「每 N 个 tick 一帧」（本机 180Hz → 每 3 tick 一帧）。
-  空闲或安装结束后 `set_animating(false)`，主循环回到纯消息等待。
+  `DCompositionWaitForCompositorClock` 等 DWM 的合成时钟。`set_animating(true, 0)`
+  表示「每个 tick 都出一帧」，本机 180Hz 屏就是 180fps；给正数（如 16）则按
+  测得周期折算成「每 N 个 tick 一帧」，用来限到 60fps 省电。空闲或安装结束后
+  `set_animating(false)`，主循环回到纯消息等待。
 - **Frame（回退路径）**：`CreateDIBSection` + GDI+ `Bitmap` 包裹同一块像素；
   `clear_transparent()` 用 `SourceCopy` 写 alpha=0，Mica/Acrylic 从底下透出。
   同一块 DIB 也被 `LayeredPresenter` 直接交给 `UpdateLayeredWindow`。
@@ -167,12 +172,15 @@ Host ── Canvas（同一套绘制动词，两套后端）
 
   | 路径 | 平均间隔 | p95 | 丢帧 | render | present | CPU（单核） |
   |---|---|---|---|---|---|---|
-  | D2D + DComp + 合成器节拍 | 16.3–16.6 ms（61 fps） | 16.8 ms | 0 | 0.97–1.65 ms | 0.58–1.02 ms | 15–21% |
+  | D2D + DComp，跟随刷新率（默认） | 5.56 ms（180 fps） | 5.65 ms | 0 / 696 | 0.72 ms | 0.46 ms | 31–38% |
+  | D2D + DComp，`--fps 60` | 16.67 ms（60 fps） | 16.89 ms | 0 | 0.78 ms | 0.52 ms | 10–21% |
   | GDI+ DIB + SourceCopy | 25–38 ms（27–40 fps） | 32–107 ms | 58–72 | 16–27 ms | 4.8–8.4 ms | 67–77% |
 
+  默认就是每个合成器 tick 一帧，180Hz 屏跑满 180fps；高刷新率下进度条用
+  `set_value_f` 亚百分比绘制，动画步长用 QPC 计算，不会退化成 60fps 的台阶。
   空闲（没有动画）时两条路径都是 0–1%：`set_animating(false)` 后主循环只等消息。
   表中是本机（RTX 4060 Ti / 180 Hz）实测，数值随系统负载浮动；paint 从 ~14 ms
-  降到 <0.2 ms 是 D2D 硬件路径的主要收益。
+  降到 <0.1 ms 是 D2D 硬件路径的主要收益。
 
 ## 已知限制
 

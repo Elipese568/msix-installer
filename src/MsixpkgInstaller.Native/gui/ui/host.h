@@ -88,6 +88,8 @@ public:
 
     void invalidate(const RectF* dirty = nullptr);
     void set_tick_handler(std::function<void()> handler);
+    /// interval_ms <= 0 表示跟随合成器时钟（有多少刷新率就出多少帧）；
+    /// 正数则按该间隔节流（例如 16 ≈ 60fps）。
     void set_animating(bool animating, int interval_ms = 33);
     /// 一次性定时回调（自动开始/自动关闭这类延迟动作），不占动画节拍。
     void schedule_once(int delay_ms, std::function<void()> callback);
@@ -167,7 +169,7 @@ private:
     bool animating_ = false;
     bool animation_timer_active_ = false;
     int animation_interval_ms_ = 33;
-    ULONGLONG last_tick_ms_ = 0;
+    double last_tick_ms_ = 0.0;
 
     // 合成器时钟节拍（180Hz 屏上按 3 个 tick 出一帧 60fps）。
     double last_clock_ms_ = 0.0;
