@@ -3,6 +3,7 @@
 > 状态：设计稿（2026-10-28）；框架核心 + demo 已实现
 > （`feature/self-drawn-ui`，2026-10-29，代码与验证记录见
 > [`src/MsixpkgInstaller.Native/gui/ui/README.md`](../src/MsixpkgInstaller.Native/gui/ui/README.md)）
+> 框架已抽为独立仓库 **Wren**，以上路径通过 submodule 接入；命名空间由 `msixpkg::ui` 改为 `wren`。
 > 范围：`src/MsixpkgInstaller.Native/gui`
 > 目标：单 HWND、全自绘、GDI+、小型 C++ UI 框架；Win11 用 Mica，Win10/旧 Win11 用 Acrylic，失败回退 Solid。
 > 关联：`docs/installer-design.md` §8（GUI 契约）、`docs/wpf-ui-feasibility.md` §10（D2D/Mica 评估）、`docs/handoff.md`（UIA 与提权注意事项）。
@@ -127,7 +128,7 @@ src/MsixpkgInstaller.Native/gui/
 ### 2.3 对象模型
 
 ```cpp
-namespace msixpkg::ui {
+namespace wren {
 
 struct RectF { float x, y, width, height; };
 struct Color { float r, g, b, a; };
@@ -196,7 +197,7 @@ public:
     int run_message_loop();
 };
 
-}  // namespace msixpkg::ui
+}  // namespace wren
 ```
 
 设计规则：
