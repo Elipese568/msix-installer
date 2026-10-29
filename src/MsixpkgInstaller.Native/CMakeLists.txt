@@ -84,8 +84,9 @@ target_compile_features(msixpkg_core PUBLIC cxx_std_20)
 target_compile_options(msixpkg_core PRIVATE /utf-8 /W4 /permissive- /EHsc /Zc:__cplusplus)
 target_compile_definitions(msixpkg_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 # bcrypt：SHA-256 / RSA / ECDSA；crypt32：证书解析与证书存储；WindowsApp：C++/WinRT 部署栈；
-# shell32：ShellExecuteW（用 shell:AppsFolder 拉起已安装的应用）。
-target_link_libraries(msixpkg_core PUBLIC bcrypt crypt32 WindowsApp shell32)
+# shell32：ShellExecuteW（用 shell:AppsFolder 拉起已安装的应用）；
+# advapi32：注册表（策略 / ARP）与 SID（判断当前账户是不是管理员，用于提权诊断）。
+target_link_libraries(msixpkg_core PUBLIC bcrypt crypt32 WindowsApp shell32 advapi32)
 
 if(MSIXPKG_WARNINGS_AS_ERRORS)
   target_compile_options(msixpkg_core PRIVATE /WX)
@@ -100,6 +101,7 @@ add_executable(msixpkg_native_tests
   tests/state_tests.cpp
   tests/reclaim_tests.cpp
   tests/policy_tests.cpp
+  tests/helper_tests.cpp
 )
 target_link_libraries(msixpkg_native_tests PRIVATE msixpkg_core)
 # 白盒测试：允许直接包含内部头（json/inflate/zip 都是两端共享的格式契约，值得单独覆盖）。
@@ -115,7 +117,10 @@ target_compile_definitions(msixpkg_native_tests PRIVATE
 )
 
 # ---------- 命令行前端 ----------
-add_executable(msixpkg_native cli/main.cpp)
+# res/msixpkg-cli.rc 只做一件事：把与向导共用的图标编进 CLI，让 Explorer / 便携包
+# 里的 msixpkg-native.exe 也有自己的图标（版本信息仍只在向导的 rc 里，避免两份版本号）。
+add_executable(msixpkg_native cli/main.cpp res/msixpkg-cli.rc)
+set_source_files_properties(res/msixpkg-cli.rc PROPERTIES COMPILE_OPTIONS "/c65001")
 target_link_libraries(msixpkg_native PRIVATE msixpkg_core)
 target_include_directories(msixpkg_native PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_options(msixpkg_native PRIVATE /utf-8 /W4 /permissive- /EHsc /Zc:__cplusplus)

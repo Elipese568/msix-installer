@@ -8,8 +8,8 @@
 [开发机]  scripts\build-nsis-installer.ps1             ──▶  artifacts\setup\MsixpkgInstaller-<版本>-setup.exe
                                                               artifacts\setup\run-setup-with-local-temp.cmd
                                                               artifacts\setup\MsixpkgInstaller-<版本>-portable.zip
-[用户机]  MsixpkgInstaller-0.2.0-setup.exe             ──▶  向导 + CLI + 快捷方式 + .msixpkg 关联 + PATH
-[用户机]  MsixpkgInstaller-0.2.0-setup.exe /S ...      ──▶  静默（CI / 批量部署 / E2E）
+[用户机]  MsixpkgInstaller-0.2.1-setup.exe             ──▶  向导 + CLI + 快捷方式 + .msixpkg 关联 + PATH
+[用户机]  MsixpkgInstaller-0.2.1-setup.exe /S ...      ──▶  静默（CI / 批量部署 / E2E）
 [%TEMP% 不可写] run-setup-with-local-temp.cmd ...      ──▶  同 setup，但先把 TEMP 指到可写位置（§7）
 [受限环境] 解压 portable.zip                           ──▶  向导 + CLI（完全不碰临时目录，§7）
 ```
@@ -65,6 +65,10 @@
 - 机器级安装的**卸载**需要管理员：卸载器发现这一点时会用 `runas` 重新拉起
   `%INSTDIR%\Uninstall.exe`（带 `/ELEVATED` 防重入）；用户拒绝提权就退出 5，不留半截状态。
 
+> **分发时必须告诉用户：安装这个安装包请右键「以管理员身份运行」。** 安装包是 `asInvoker`，
+> 不会自己弹 UAC；未提权只会装成用户级，带主动防御的机器上关联 / PATH / ARP 还可能写不进去。
+> 分发 zip 里的 `README.md` 已把这条放在最前面（见 §4 的 `pack-installer-zip.ps1`）。
+
 ## 3. 命令行开关
 
 | 开关 | 作用 |
@@ -82,7 +86,7 @@
 
 ```powershell
 # 只为我静默安装到指定目录（CI / E2E 用的形式；/D= 必须是最后一个参数）
-MsixpkgInstaller-0.2.0-setup.exe /S /CURRENTUSER /NODESKTOP /D=C:\tools\msixpkg
+MsixpkgInstaller-0.2.1-setup.exe /S /CURRENTUSER /NODESKTOP /D=C:\tools\msixpkg
 
 # 卸载（静默）：注意卸载器会把自己复制到 %TEMP% 再跑
 & "$env:LOCALAPPDATA\Programs\Msixpkg Installer\Uninstall.exe" /S
@@ -107,11 +111,20 @@ powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1
 #   -NsisDir       用自己装的 NSIS（目录里要有 makensis.exe 与 Include\MUI2.nsh）
 #   -NoProvision   不允许联网下载 NSIS 工具链
 #   -Sign -PfxPath <pfx> -PfxPassword ***   用 signtool 签名产物
+
+# 3) 打「安装包 + README」的分发 zip
+powershell -ExecutionPolicy Bypass -File scripts\pack-installer-zip.ps1
+#   → artifacts\setup\MsixpkgInstaller-<版本>-dist.zip
 ```
 
 产物：`artifacts\setup\MsixpkgInstaller-<版本>-setup.exe` + 同名 `.sha256`。
 版本号来自 `src\MsixpkgInstaller.Native\res\msixpkg.rc` 的 `FILEVERSION`（单一事实来源），
 载荷大小自动算进 ARP 的 `EstimatedSize`。编译用 `/WX`：**有告警就是失败**。
+
+分发 zip 由 `scripts\pack-installer-zip.ps1` 生成：把 setup exe、它的 `.sha256` 和渲染后的
+`README.md`（模板 [`README-dist.md`](README-dist.md)）打进
+`artifacts\setup\MsixpkgInstaller-<版本>-dist.zip`。README 里写明了「以管理员身份运行」、
+静默安装、使用与卸载指引；脚本会断言这些内容真的在包里，缺了直接失败。
 
 ### 为什么构建脚本要自己下载 NSIS
 

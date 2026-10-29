@@ -263,7 +263,7 @@ Check ($cliRun.ExitCode -eq 0) ('installed CLI runs (exit code ' + $cliRun.ExitC
 Check-Contains $cliRun.Output 'msixpkg-native' 'installed CLI prints its usage'
 
 $versionInfo = (Get-Item $setup).VersionInfo
-Check ($versionInfo.ProductVersion -like '0.2.0*') ('setup exe carries the product version (' + $versionInfo.ProductVersion + ')')
+Check ($versionInfo.ProductVersion -like '0.2.1*') ('setup exe carries the product version (' + $versionInfo.ProductVersion + ')')
 
 # ---------------------------------------------------------------------------
 # 3) idempotency: installing over an existing install
@@ -331,7 +331,7 @@ if (-not $registryEffective) {
 } else {
     Check ((Get-RegValue $cfgKey 'InstallDir') -eq $appDir) 'install record points at the requested directory'
     Check ((Get-RegValue $cfgKey 'InstallMode') -eq 'currentuser') 'install record says currentuser'
-    Check ((Get-RegValue $cfgKey 'Version') -eq '0.2.0') ('install record carries the version (' + (Get-RegValue $cfgKey 'Version') + ')')
+    Check ((Get-RegValue $cfgKey 'Version') -eq '0.2.1') ('install record carries the version (' + (Get-RegValue $cfgKey 'Version') + ')')
 
     $displayName = Get-RegValue $arpKey 'DisplayName'
     Check ($null -ne $displayName) 'Apps & features entry exists'

@@ -1,0 +1,14 @@
+// CLI（msixpkg-native.exe）的资源编译单元。
+//
+// 这里只放图标：命令行程序不需要向导的字符串表，也不该复用 res/msixpkg.rc ——
+// 那份资源的 VS_VERSION_INFO 写的是 msixpkg-installer.exe，装到 CLI 上会给出
+// 错误的「属性 → 详细信息」。图标与向导共用同一份多尺寸 msixpkg.ico
+// （母版 res/msixpkg.png，由 scripts/build-app-icon.ps1 生成）。
+//
+// /c65001：与 res/msixpkg.rc 一样是 UTF-8（无 BOM），必须显式告诉 rc.exe。
+#pragma code_page(65001)
+
+#include <windows.h>
+#include "resource.h"
+
+IDI_MSIXPKG ICON "msixpkg.ico"

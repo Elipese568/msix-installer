@@ -288,6 +288,34 @@ DataRoots peek_data_roots() {
     return make_roots(candidates.front().root, candidates.front().machine_wide, {});
 }
 
+std::vector<DataRoots> publisher_policy_roots() {
+    const std::vector<DataRootCandidate> candidates = data_root_candidates();
+    if (candidates.empty()) {
+        return {};
+    }
+
+    // 显式覆盖（测试 / E2E / 用户把数据放到别处）：只认那一个根。
+    // 否则测试会被本机真实的 %ProgramData% 、%LOCALAPPDATA% 记录污染。
+    if (candidates.front().explicit_override) {
+        return {make_roots(candidates.front().root, candidates.front().machine_wide, {})};
+    }
+
+    std::vector<DataRoots> roots;
+    for (const DataRootCandidate& candidate : candidates) {
+        std::error_code error;
+        if (std::filesystem::is_directory(candidate.root, error)) {
+            roots.push_back(make_roots(candidate.root, candidate.machine_wide, {}));
+        }
+    }
+
+    // 一个都还没建出来：给首选位置（读不到就是「什么都没记住」）。
+    if (roots.empty()) {
+        roots.push_back(make_roots(candidates.front().root, candidates.front().machine_wide, {}));
+    }
+
+    return roots;
+}
+
 void StateStore::ensure_directories() const {
     std::error_code error;
     for (const std::filesystem::path& directory : {roots_.root, roots_.state, roots_.staging, roots_.logs}) {

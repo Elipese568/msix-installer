@@ -89,10 +89,10 @@ ${Using:StrFunc} UnStrStr
 !endif
 
 !ifndef PRODUCT_VERSION
-  !define PRODUCT_VERSION "0.2.0"
+  !define PRODUCT_VERSION "0.2.1"
 !endif
 !ifndef PRODUCT_VERSION_QUAD
-  !define PRODUCT_VERSION_QUAD "0.2.0.0"
+  !define PRODUCT_VERSION_QUAD "0.2.1.0"
 !endif
 !ifndef APP_GUI
   !define APP_GUI "${__FILEDIR__}\..\..\src\MsixpkgInstaller.Native\build\x64\Release\msixpkg-installer.exe"

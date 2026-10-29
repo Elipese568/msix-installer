@@ -44,6 +44,13 @@ struct PublisherPolicy {
 };
 
 /// 读取策略。**永不抛**：读不到就是空白名单（默认拒绝是安全方向）。
+///
+/// `roots` 列出所有要查「记住的发布者」的数据根目录（见 `publisher_policy_roots()`）：
+/// 每个根下的 `publishers.json` 都会被读入并合并去重。传多个根是必需的 ——
+/// 只读预演与真正安装对「哪个根可写」的判断不同，只读一个根会让 TOFU 记录永远读不到。
+PublisherPolicy load_publisher_policy(const std::vector<DataRoots>& roots);
+
+/// 只查一个数据根的便捷重载（测试、以及确定自己只有这一个根的调用方）。
 PublisherPolicy load_publisher_policy(const DataRoots& roots);
 
 /// TOFU 记录文件：`<数据根>\publishers.json`。

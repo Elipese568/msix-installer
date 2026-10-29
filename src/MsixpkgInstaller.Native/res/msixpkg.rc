@@ -12,13 +12,15 @@
 #include "resource.h"
 
 // 图标：资源 ID 1，与 wWinMain 里 LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_MSIXPKG)) 对应。
+// 母版是 res/msixpkg.png（1024×1024，四角透明）；多尺寸 msixpkg.ico 由
+// scripts/build-app-icon.ps1 生成（16–128 用 DIB、256 用 PNG），不要手工改 .ico。
 IDI_MSIXPKG ICON "msixpkg.ico"
 
 // 版本信息：让「属性 → 详细信息」能显示版本；ARP 条目的 DisplayVersion 用的是
 // 容器清单里的应用版本（那是用户关心的），这里是安装器自身的版本。
 VS_VERSION_INFO VERSIONINFO
-    FILEVERSION 0, 2, 0, 0
-    PRODUCTVERSION 0, 2, 0, 0
+    FILEVERSION 0, 2, 1, 0
+    PRODUCTVERSION 0, 2, 1, 0
     FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
     FILEFLAGS 0x0L
     FILEOS VOS_NT_WINDOWS32
@@ -31,11 +33,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "MsixpkgInstaller"
             VALUE "FileDescription", "Msixpkg Installer"
-            VALUE "FileVersion", "0.2.0.0"
+            VALUE "FileVersion", "0.2.1.0"
             VALUE "InternalName", "msixpkg-installer"
             VALUE "OriginalFilename", "msixpkg-installer.exe"
             VALUE "ProductName", "Msixpkg Installer"
-            VALUE "ProductVersion", "0.2.0.0"
+            VALUE "ProductVersion", "0.2.1.0"
         END
     END
     BLOCK "VarFileInfo"

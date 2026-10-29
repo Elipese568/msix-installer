@@ -285,3 +285,28 @@ MSIXPKG_TEST(plan_treats_a_remembered_publisher_as_pinned_on_the_next_run) {
     CHECK(!forgot.publisher_pinned);
     CHECK(forgot.consent.unpinned_publisher);
 }
+
+MSIXPKG_TEST(policy_remembered_publishers_merge_across_data_roots) {
+    // 安装按「可写」挑数据根、只读预演按「已存在」挑数据根，两者在
+    // 「%ProgramData%\Msixpkg 存在但当前用户不可写」的机器上必然不同。
+    // 所以「记住的发布者」必须把所有根合起来读，否则 TOFU 永远不生效
+    // （真实症状：每次都要求重新勾选「信任此发布者」，日志永远是 NOT pinned）。
+    const msixpkg::DataRoots machine = msixpkg::data_roots_at(scratch_root("policy-merge-machine"));
+    const msixpkg::DataRoots user = msixpkg::data_roots_at(scratch_root("policy-merge-user"));
+
+    const std::string second_thumbprint(64, '0');
+
+    CHECK(msixpkg::remember_publisher(machine, kGoldenThumbprint, kGoldenSubject));
+    CHECK(msixpkg::remember_publisher(user, second_thumbprint, "CN=Second"));
+
+    const msixpkg::PublisherPolicy merged =
+        msixpkg::load_publisher_policy(std::vector<msixpkg::DataRoots>{machine, user});
+    CHECK_MSG(merged.is_pinned(kGoldenThumbprint), "publishers from every root must be merged");
+    CHECK_MSG(merged.is_pinned(second_thumbprint), "publishers from every root must be merged");
+    CHECK(merged.warnings.empty());
+
+    // 只给一个根时行为不变（CLI 与既有调用方仍按单根读）。
+    const msixpkg::PublisherPolicy single = msixpkg::load_publisher_policy(machine);
+    CHECK(single.is_pinned(kGoldenThumbprint));
+    CHECK(!single.is_pinned(second_thumbprint));
+}

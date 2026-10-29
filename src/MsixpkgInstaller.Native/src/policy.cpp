@@ -209,36 +209,51 @@ std::filesystem::path remembered_publishers_path(const DataRoots& roots) {
     return roots.root / "publishers.json";
 }
 
-PublisherPolicy load_publisher_policy(const DataRoots& roots) {
+PublisherPolicy load_publisher_policy(const std::vector<DataRoots>& roots) {
     PublisherPolicy policy = read_machine_policy();
 
-    const std::optional<std::string> text = read_text_file(remembered_publishers_path(roots));
-    if (!text.has_value()) {
-        return policy;
-    }
+    // 每个根各读一份：只读预演按「目录已存在」挑根、安装按「可写」挑根，
+    // 两者在「%ProgramData%\Msixpkg 存在但不可写」的机器上必然不同，
+    // 所以「记住的发布者」必须把所有根合起来看（否则 TOFU 永远不生效）。
+    const auto add_warning_once = [&policy](const std::string& warning) {
+        if (std::find(policy.warnings.begin(), policy.warnings.end(), warning) == policy.warnings.end()) {
+            policy.warnings.push_back(warning);
+        }
+    };
 
-    try {
-        const json::Value root = json::parse(*text);
-        const json::Value* publishers = root.find("publishers");
-        if (publishers == nullptr || publishers->kind != json::Value::Kind::Array) {
-            policy.warnings.push_back("the remembered-publisher file has no \"publishers\" array; ignored");
-            return policy;
+    for (const DataRoots& entry : roots) {
+        const std::optional<std::string> text = read_text_file(remembered_publishers_path(entry));
+        if (!text.has_value()) {
+            continue;
         }
 
-        for (const json::Value& item : publishers->items) {
-            if (item.kind != json::Value::Kind::Object) {
+        try {
+            const json::Value root = json::parse(*text);
+            const json::Value* publishers = root.find("publishers");
+            if (publishers == nullptr || publishers->kind != json::Value::Kind::Array) {
+                add_warning_once("the remembered-publisher file has no \"publishers\" array; ignored");
                 continue;
             }
 
-            add_unique(policy.remembered, get_string(item, "sha256"));
+            for (const json::Value& item : publishers->items) {
+                if (item.kind != json::Value::Kind::Object) {
+                    continue;
+                }
+
+                add_unique(policy.remembered, get_string(item, "sha256"));
+            }
+        } catch (const std::exception&) {
+            // 记录文件被人手改坏时，最安全的做法是当成「没有记住任何东西」，
+            // 也就是回到「未命中钉扎 → 需要明确同意」这条路径。
+            add_warning_once("the remembered-publisher file is not valid JSON; ignored");
         }
-    } catch (const std::exception&) {
-        // 记录文件被人手改坏时，最安全的做法是当成「没有记住任何东西」，
-        // 也就是回到「未命中钉扎 → 需要明确同意」这条路径。
-        policy.warnings.push_back("the remembered-publisher file is not valid JSON; ignored");
     }
 
     return policy;
+}
+
+PublisherPolicy load_publisher_policy(const DataRoots& roots) {
+    return load_publisher_policy(std::vector<DataRoots>{roots});
 }
 
 bool remember_publisher(

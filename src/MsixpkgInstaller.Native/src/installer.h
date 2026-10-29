@@ -25,7 +25,7 @@
 namespace msixpkg {
 
 /// 原生安装器版本（用于容器清单的 `installerMinVersion` 门禁与 ARP 展示）。
-inline constexpr char kInstallerVersion[] = "0.2.0";
+inline constexpr char kInstallerVersion[] = "0.2.1";
 
 struct InstallOptions {
     std::filesystem::path container;
@@ -215,5 +215,44 @@ CertificateHelperResult certificate_add_from_container(
 
 /// `cert-remove` 子命令的实现（必须由**已提权**的进程调用）。
 bool certificate_remove_by_sha1(const std::string& sha1_hex);
+
+/// 提权助手（`cert-add` / `cert-remove`）的可执行文件路径。
+///
+/// **必须是与安装器同目录的 CLI `msixpkg-native.exe`**：只有它认识这两个子命令。
+/// 曾经这里直接用了 `current_executable_path()`，于是 GUI（`msixpkg-installer.exe`）
+/// 会把**自己**当助手再拉起一次：它把 `cert-add` 当成容器路径，转而去给已存在的窗口
+/// 发 WM_COPYDATA（单实例交接），而那个窗口的 UI 线程正卡在等这次提权返回 ——
+/// 三方互等，安装永久停在「正在等待管理员确认…」，GUI 变成「未响应」，
+/// 证书也永远不会被导入（日志最后一行永远是 `elevating: …`）。
+///
+/// `self` 是调用方自己的可执行文件路径（通常就是 `current_executable_path()`）。
+/// CLI 自己运行时（命令行前端 `install`）直接返回它自己。
+/// 找不到助手时返回空路径并把原因写进 `error` —— **永不抛**。
+std::filesystem::path helper_executable_path(const std::filesystem::path& self, std::string& error);
+
+/// 本机的 UAC 提权策略（`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`）。
+///
+/// 为什么要读它：`ShellExecuteEx(runas)` 会不会弹确认框**完全由这几项决定**。
+/// `ConsentPromptBehaviorAdmin = 0`（「不提示直接提升」，见 [MS-GPSB] 2.2.11.2）
+/// 时根本不会有 UAC 窗口：助手是静默提权跑起来的，用户只会看到
+/// 「正在等待管理员确认…」却永远等不到窗口，于是以为提权卡住了
+/// （0.2.0 那次「看不到 UAC」的现场就是这样：策略是 0，而真正的故障是 GUI 把自己当助手）。
+///
+/// 把生效策略写进日志，下一次「为什么没有 UAC / 为什么提权失败」就不用再猜。
+struct ElevationPolicy {
+    bool enable_lua = true;
+    uint32_t consent_prompt_admin = 5;
+    uint32_t consent_prompt_user = 3;
+    uint32_t prompt_on_secure_desktop = 1;
+    uint32_t validate_admin_code_signatures = 0;
+
+    /// 管理员请求提权时本机会不会弹确认框（`EnableLUA=0` 或策略 0 = 不会）。
+    [[nodiscard]] bool prompts_administrators() const noexcept;
+    /// 一行诊断，写进日志。
+    [[nodiscard]] std::string describe() const;
+};
+
+/// 读取上面的策略。读不到注册表时返回默认值（与 Windows 出厂设置一致），**永不抛**。
+ElevationPolicy read_elevation_policy();
 
 }  // namespace msixpkg

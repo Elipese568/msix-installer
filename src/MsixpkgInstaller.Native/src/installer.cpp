@@ -118,13 +118,22 @@ enum class ElevationOutcome {
     Ran,
     Cancelled,
     Failed,
+    /// 连请求都没发出去：本机策略/AppLocker 之类直接拒绝提权（**不会**有窗口）。
+    Blocked,
+    TimedOut,
 };
 
+/// 等提权助手的上界。助手只做「复算容器指纹 + 导入一张证书」，正常在 1–2 秒内结束；
+/// 10 分钟是给超大容器 + 极慢磁盘留的余量。**绝不再用 INFINITE**：
+/// 助手一旦卡住（或被人替换成不返回的程序），父进程的安装线程就永远回不来，
+/// 而 GUI 关窗要等它 —— 表现就是「未响应 + 进程消失不掉」。
+constexpr DWORD kElevationTimeoutMs = 10u * 60u * 1000u;
+
 ElevationOutcome run_elevated(
+    const std::filesystem::path& executable,
     const std::wstring& arguments,
     DWORD& exit_code,
     std::string& error) {
-    const std::filesystem::path executable = current_executable_path();
     // lpDirectory 必须指向一个活到 ShellExecuteExW 返回之后的对象：这里不能直接写
     // executable.parent_path().c_str()（临时对象在语句结束时就没了）。
     const std::filesystem::path directory = executable.parent_path();
@@ -146,10 +155,25 @@ ElevationOutcome run_elevated(
         }
 
         error = "ShellExecuteEx failed: Win32 error " + std::to_string(last);
+        // 「只提升已签名/已验证的可执行文件」「AppLocker / 软件限制策略」这类策略会在
+        // 弹窗之前就拒绝：用户什么都看不到。必须与「启动失败」区分开，才解释得清。
+        if (last == ERROR_ACCESS_DENIED) {
+            return ElevationOutcome::Blocked;
+        }
+
         return ElevationOutcome::Failed;
     }
 
-    ::WaitForSingleObject(info.hProcess, INFINITE);
+    const DWORD waited = ::WaitForSingleObject(info.hProcess, kElevationTimeoutMs);
+    if (waited == WAIT_TIMEOUT) {
+        // 卡住的助手已经没有用处，还会一直占着证书存储的写入路径：结束它再报错。
+        ::TerminateProcess(info.hProcess, 1);
+        ::WaitForSingleObject(info.hProcess, 5000);
+        ::CloseHandle(info.hProcess);
+        error = "the elevated helper did not finish within 10 minutes and was terminated";
+        return ElevationOutcome::TimedOut;
+    }
+
     DWORD code = 1;
     ::GetExitCodeProcess(info.hProcess, &code);
     ::CloseHandle(info.hProcess);
@@ -238,6 +262,22 @@ uint64_t total_payload_size(const Manifest& manifest) {
     return total;
 }
 
+/// 当前账户（未提权的过滤令牌也算）是否属于 Administrators。
+/// 只用于把「本机提权不弹窗」这条诊断讲准确：标准用户看到的是凭据对话框，不是静默提权。
+bool current_user_is_administrator() {
+    SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
+    PSID administrators = nullptr;
+    if (::AllocateAndInitializeSid(&authority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
+                                   &administrators) == FALSE) {
+        return false;
+    }
+
+    BOOL member = FALSE;
+    ::CheckTokenMembership(nullptr, administrators, &member);
+    ::FreeSid(administrators);
+    return member != FALSE;
+}
+
 /// 把提权助手的结果（raw 文件）转成内部结构。
 HelperResultFile run_certificate_helper(
     bool add,
@@ -261,11 +301,32 @@ HelperResultFile run_certificate_helper(
         arguments += L" --log " + quote_argument(log_path.wstring());
     }
 
-    log.line("elevating: msixpkg-native " + narrow_utf8(arguments));
+    // 助手只能是 CLI：GUI 自己不认识 cert-add（见 installer.h 的说明）。
+    std::string helper_error;
+    const std::filesystem::path helper = helper_executable_path(current_executable_path(), helper_error);
+    if (helper.empty()) {
+        log.line("elevation impossible: " + helper_error);
+        throw Error(
+            deployment_codes::AccessDenied,
+            "The publisher certificate cannot be imported because the command-line helper is missing.",
+            helper_error);
+    }
+
+    // 把生效的提权策略写进日志：`ConsentPromptBehaviorAdmin = 0` 时**不会有 UAC 窗口**，
+    // 没有这一行，「为什么看不到 UAC」就永远只能靠猜。
+    const ElevationPolicy policy = read_elevation_policy();
+    log.line("elevation policy: " + policy.describe());
+    if (!is_process_elevated() && current_user_is_administrator() && !policy.prompts_administrators()) {
+        log.line(
+            "note: this machine elevates administrators without a prompt (ConsentPromptBehaviorAdmin=0), "
+            "so no UAC window will appear; the helper starts silently");
+    }
+
+    log.line("elevating: " + narrow_utf8(helper.wstring()) + " " + narrow_utf8(arguments));
 
     DWORD exit_code = 1;
     std::string error;
-    const ElevationOutcome outcome = run_elevated(arguments, exit_code, error);
+    const ElevationOutcome outcome = run_elevated(helper, arguments, exit_code, error);
     if (outcome == ElevationOutcome::Cancelled) {
         elevation_declined = true;
         throw Error(
@@ -273,8 +334,20 @@ HelperResultFile run_certificate_helper(
             "Elevation was declined, so the publisher certificate was not changed.");
     }
 
+    if (outcome == ElevationOutcome::Blocked) {
+        log.line("elevation blocked before any UI: " + error);
+        throw Error(
+            deployment_codes::AccessDenied,
+            "Windows refused to elevate the certificate helper, so nothing was changed.",
+            error + "; policy: " + policy.describe());
+    }
+
     if (outcome == ElevationOutcome::Failed) {
         throw Error(deployment_codes::AccessDenied, "The elevated helper could not be started.", error);
+    }
+
+    if (outcome == ElevationOutcome::TimedOut) {
+        throw Error(deployment_codes::Failed, "The elevated certificate helper stopped responding.", error);
     }
 
     if (exit_code != 0) {
@@ -295,6 +368,77 @@ HelperResultFile run_certificate_helper(
 }
 
 }  // namespace
+
+// ---------- 提权助手的位置 ----------
+
+std::filesystem::path helper_executable_path(const std::filesystem::path& self, std::string& error) {
+    error.clear();
+
+    // CLI 自己就是助手：命令行前端 install 走这条路（它本来就认识 cert-add）。
+    if (equals_ignore_case_ascii(narrow_utf8(self.filename().wstring()), "msixpkg-native.exe")) {
+        return self;
+    }
+
+    // 其余前端（GUI）必须用**同目录的 CLI**：NSIS 安装包把两个 exe 放在一起。
+    std::error_code status;
+    const std::filesystem::path sibling = self.parent_path() / L"msixpkg-native.exe";
+    if (std::filesystem::is_regular_file(sibling, status) && !status) {
+        return sibling;
+    }
+
+    error = "msixpkg-native.exe was not found next to " + narrow_utf8(self.wstring()) +
+            " (expected " + narrow_utf8(sibling.wstring()) + ").";
+    return {};
+}
+
+// ---------- 本机提权策略 ----------
+
+bool ElevationPolicy::prompts_administrators() const noexcept {
+    // EnableLUA=0（UAC 整体关闭）时管理员本来就是全权的，不会有任何提示；
+    // ConsentPromptBehaviorAdmin=0 是「不提示直接提升」（[MS-GPSB] 2.2.11.2）。
+    return enable_lua && consent_prompt_admin != 0;
+}
+
+std::string ElevationPolicy::describe() const {
+    std::string text = "EnableLUA=" + std::to_string(enable_lua ? 1 : 0);
+    text += " ConsentPromptBehaviorAdmin=" + std::to_string(consent_prompt_admin);
+    text += " ConsentPromptBehaviorUser=" + std::to_string(consent_prompt_user);
+    text += " PromptOnSecureDesktop=" + std::to_string(prompt_on_secure_desktop);
+    text += " ValidateAdminCodeSignatures=" + std::to_string(validate_admin_code_signatures);
+    text += prompts_administrators() ? " (administrators are prompted)" : " (administrators are NOT prompted)";
+    return text;
+}
+
+ElevationPolicy read_elevation_policy() {
+    ElevationPolicy policy;
+
+    HKEY key = nullptr;
+    if (::RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", 0,
+                        KEY_READ | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) {
+        return policy;
+    }
+
+    const auto read = [key](const wchar_t* name, uint32_t fallback) {
+        DWORD value = fallback;
+        DWORD size = sizeof(value);
+        DWORD type = 0;
+        if (::RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&value), &size) != ERROR_SUCCESS ||
+            type != REG_DWORD) {
+            return fallback;
+        }
+
+        return static_cast<uint32_t>(value);
+    };
+
+    policy.enable_lua = read(L"EnableLUA", 1) != 0;
+    policy.consent_prompt_admin = read(L"ConsentPromptBehaviorAdmin", 5);
+    policy.consent_prompt_user = read(L"ConsentPromptBehaviorUser", 3);
+    policy.prompt_on_secure_desktop = read(L"PromptOnSecureDesktop", 1);
+    policy.validate_admin_code_signatures = read(L"ValidateAdminCodeSignatures", 0);
+
+    ::RegCloseKey(key);
+    return policy;
+}
 
 // ---------- 提权助手的实现（由已提权进程调用） ----------
 
@@ -489,10 +633,11 @@ InstallPlan Installer::plan(const InstallOptions& options) {
 
     // ---- 钉扎白名单：管理员部署的 + 用户之前记住的 + 调用方显式给的 ----
     //
-    // 只读预演不能建目录，所以这里用 peek_data_roots()（绝不创建任何东西）。
-    // peek 拿到的位置如果还不存在，读白名单自然什么也读不到，这是正确行为。
-    const DataRoots roots = peek_data_roots();
-    const PublisherPolicy policy = load_publisher_policy(roots);
+    // 只读预演不能建目录，所以这里只看**已经存在**的数据根（publisher_policy_roots()
+    // 绝不创建任何东西）。必须把**所有**根都看一遍：安装按「可写」挑根、预演按
+    // 「已存在」挑根，只读一个根会让「信任此发布者（将记住）」在
+    // 「%ProgramData%\Msixpkg 存在但当前用户不可写」的机器上永远读不回来。
+    const PublisherPolicy policy = load_publisher_policy(publisher_policy_roots());
     plan.warnings = policy.warnings;
 
     std::vector<std::string> pins = options.allowed_publisher_thumbprints;

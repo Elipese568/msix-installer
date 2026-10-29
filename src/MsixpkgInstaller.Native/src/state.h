@@ -98,8 +98,27 @@ DataRoots resolve_data_roots();
  *
  * 存在的意义：dry-run 与 GUI 摘要页只想「看一眼」，不该因为一次预览就在
  * `%ProgramData%` 下建目录、写日志、甚至收紧 ACL。
+ *
+ * 注意：**不要**用它去读「记住的发布者」。它按「已存在」挑根，而安装按「可写」
+ * 挑根，两者在「`%ProgramData%\Msixpkg` 存在但当前用户不可写」的机器上不同 ——
+ * 那正是 TOFU 记录读不回来、每次安装都要求重勾的原因。要读策略请用
+ * `publisher_policy_roots()`（合并所有已存在的根）。
  */
 DataRoots peek_data_roots();
+
+/**
+ * 读「记住的发布者」（TOFU）时要看的**全部**数据根目录，按候选优先级排列。
+ *
+ * 为什么不是一个：`resolve_data_roots()`（真正安装时用）按「可写」选，而
+ * `peek_data_roots()`（只读预演用）只能按「已存在」选 —— 两者在
+ * 「`%ProgramData%\Msixpkg` 存在但当前用户不可写」这种最常见的机器上会**不一致**：
+ * 安装把记录写进 `%LOCALAPPDATA%\Msixpkg\publishers.json`，预演却去读
+ * `%ProgramData%\Msixpkg\publishers.json`（不存在），于是「信任此发布者（将记住）」
+ * 永远不生效、每次安装都要重新勾一遍（日志里那句 `pinning: NOT pinned` 就是它）。
+ *
+ * 这里只列**已经存在**的目录，绝不创建任何东西（预演阶段不许有副作用）。
+ */
+std::vector<DataRoots> publisher_policy_roots();
 
 /// 显式指定根目录（测试与 E2E 用）。
 DataRoots data_roots_at(const std::filesystem::path& root, bool machine_wide = false);
