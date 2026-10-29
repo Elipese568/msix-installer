@@ -96,7 +96,7 @@ Host ── Canvas（同一套绘制动词，两套后端）
   │      └─ GDI+ Frame(DIB) → LayeredPresenter（opt-in，UpdateLayeredWindow）
   ├─ DirectWriteText（灰度 AA；两条后端共用同一份 layout）
   ├─ Material（Mica/Acrylic/Solid）
-  ├─ 合成器时钟节拍（180Hz 屏按 3 tick 出一帧 60fps）；空闲不跑帧
+  ├─ 合成器时钟节拍（默认每个 tick 一帧＝跟随刷新率，180Hz 跑 180fps）；空闲不跑帧
   └─ 焦点 / Tab / Enter / Esc / 鼠标 / 滚轮 / MSAA
 ```
 

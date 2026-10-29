@@ -4,8 +4,9 @@
 //
 // GdiPresenter 是兼容路径：普通窗口 + 重定向位图 + GDI+ SourceCopy，不受
 // 垂直同步约束，撕裂只能靠人眼看不见；LayeredPresenter 是 Acrylic 的备选；
-// GpuPresenter 用 D3D11 flip-model 交换链（预乘 alpha）上屏，Present(1) 由
-// vsync 驱动，既没有 BitBlt 撕裂，也把「什么时候该画下一帧」交给合成器。
+// GpuPresenter 用 D3D11 + DirectComposition 的组合交换链（预乘 alpha）上屏，
+// 没有 BitBlt 撕裂。注意组合交换链的 Present 不做反压，所以「什么时候画下一帧」
+// 由 Host 用 DCompositionWaitForCompositorClock 等合成器时钟（compositor_paced）。
 
 #include "canvas.h"
 
