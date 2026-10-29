@@ -2,12 +2,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 
 namespace msixpkg::ui {
 namespace {
 
 Gdiplus::RectF to_gdiplus(const RectF& rect) {
     return Gdiplus::RectF(rect.x, rect.y, rect.width, rect.height);
+}
+
+D2D1_COLOR_F to_d2d(const Color& color) {
+    return D2D1::ColorF(color.r, color.g, color.b, color.a);
+}
+
+D2D1_RECT_F to_d2d(const RectF& rect) {
+    return D2D1::RectF(rect.x, rect.y, rect.right(), rect.bottom());
 }
 
 RectF intersect_rect(const RectF& left, const RectF& right) {
@@ -129,13 +138,45 @@ Canvas::Canvas(Gdiplus::Bitmap& bitmap, float dpi, int width_px, int height_px)
 
 Canvas::~Canvas() = default;
 
+Canvas::Canvas(ID2D1DeviceContext* target, float dpi, int width_px, int height_px)
+    : d2d_(target), dpi_(dpi > 0.0f ? dpi : 96.0f), width_px_(width_px), height_px_(height_px) {
+    if (d2d_ == nullptr) {
+        return;
+    }
+
+    d2d_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f), d2d_brush_.ReleaseAndGetAddressOf());
+
+    Microsoft::WRL::ComPtr<ID2D1Factory> factory;
+    d2d_->GetFactory(factory.ReleaseAndGetAddressOf());
+    if (factory != nullptr) {
+        D2D1_STROKE_STYLE_PROPERTIES properties{};
+        properties.startCap = D2D1_CAP_STYLE_ROUND;
+        properties.endCap = D2D1_CAP_STYLE_ROUND;
+        properties.dashCap = D2D1_CAP_STYLE_FLAT;
+        properties.lineJoin = D2D1_LINE_JOIN_ROUND;
+        factory->CreateStrokeStyle(properties, nullptr, 0, d2d_stroke_.ReleaseAndGetAddressOf());
+    }
+
+    d2d_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    d2d_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    set_dpi(dpi_);
+}
+
 void Canvas::set_dpi(float dpi) {
     dpi_ = dpi > 0.0f ? dpi : 96.0f;
+    const float scale = dpi_ / 96.0f;
+
+    if (d2d_ != nullptr) {
+        // D2D 的坐标是 DIP；和 GDI+ 路径一样按 dpi/96 缩放，调用方只写 DIP。
+        d2d_->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+        return;
+    }
+
     // 所有绘制都按 DIP 给坐标，这里一次性放大到像素。文字也走这条变换，
     // 所以字体按 DIP 尺寸创建即可，不需要两套坐标。
     graphics_->ResetTransform();
-    const Gdiplus::REAL scale = dpi_ / 96.0f;
-    graphics_->ScaleTransform(scale, scale, Gdiplus::MatrixOrderAppend);
+    graphics_->ScaleTransform(static_cast<Gdiplus::REAL>(scale), static_cast<Gdiplus::REAL>(scale),
+                              Gdiplus::MatrixOrderAppend);
 }
 
 Gdiplus::Graphics& Canvas::graphics() {
@@ -243,12 +284,26 @@ void Canvas::fill_rect(const RectF& rect, const Color& color) {
         return;
     }
 
+    if (d2d_ != nullptr) {
+        d2d_brush_->SetColor(to_d2d(color));
+        d2d_->FillRectangle(to_d2d(rect), d2d_brush_.Get());
+        return;
+    }
+
     Gdiplus::SolidBrush brush(color.to_gdiplus());
     graphics_->FillRectangle(&brush, to_gdiplus(rect));
 }
 
 void Canvas::fill_round_rect(const RectF& rect, float radius, const Color& color) {
     if (rect.empty() || color.a <= 0.0f) {
+        return;
+    }
+
+    if (d2d_ != nullptr) {
+        const float limit = std::min(rect.width, rect.height) * 0.5f;
+        const float r = std::clamp(radius, 0.0f, std::max(0.0f, limit));
+        d2d_brush_->SetColor(to_d2d(color));
+        d2d_->FillRoundedRectangle(D2D1::RoundedRect(to_d2d(rect), r, r), d2d_brush_.Get());
         return;
     }
 
@@ -269,6 +324,15 @@ void Canvas::stroke_round_rect(const RectF& rect, float radius, const Color& col
         return;
     }
 
+    if (d2d_ != nullptr) {
+        const float limit = std::min(inner.width, inner.height) * 0.5f;
+        const float r = std::clamp(std::max(0.0f, radius - width * 0.5f), 0.0f, std::max(0.0f, limit));
+        d2d_brush_->SetColor(to_d2d(color));
+        d2d_->DrawRoundedRectangle(D2D1::RoundedRect(to_d2d(inner), r, r), d2d_brush_.Get(), width,
+                                   d2d_stroke_.Get());
+        return;
+    }
+
     Gdiplus::GraphicsPath path;
     add_round_rect(path, inner, std::max(0.0f, radius - width * 0.5f));
     Gdiplus::Pen pen(color.to_gdiplus(), width);
@@ -278,6 +342,12 @@ void Canvas::stroke_round_rect(const RectF& rect, float radius, const Color& col
 
 void Canvas::draw_line(float x1, float y1, float x2, float y2, const Color& color, float width) {
     if (color.a <= 0.0f || width <= 0.0f) {
+        return;
+    }
+
+    if (d2d_ != nullptr) {
+        d2d_brush_->SetColor(to_d2d(color));
+        d2d_->DrawLine(D2D1::Point2F(x1, y1), D2D1::Point2F(x2, y2), d2d_brush_.Get(), width, d2d_stroke_.Get());
         return;
     }
 
@@ -308,6 +378,17 @@ void Canvas::draw_text(std::wstring_view text, const RectF& rect, const TextStyl
 
 void Canvas::draw_text_immediate(std::wstring_view text, const RectF& rect, const TextStyle& style,
                                  const Color& color, const RectF& clip) {
+    if (d2d_ != nullptr) {
+        // 硬件后端没有 GDI+ Graphics；文字由 DirectWriteText 画到同一个 D2D target。
+        // Host 只在文字引擎就绪时才启用硬件路径，所以这里只会是误用。
+        (void)text;
+        (void)rect;
+        (void)style;
+        (void)color;
+        (void)clip;
+        return;
+    }
+
     if (text.empty() || rect.empty() || color.a <= 0.0f) {
         return;
     }
@@ -337,11 +418,20 @@ RectF Canvas::current_clip() const {
 }
 
 void Canvas::flush() {
+    if (d2d_ != nullptr) {
+        return;  // D2D 的提交在 presenter 的 EndDraw
+    }
+
     graphics_->Flush(Gdiplus::FlushIntentionSync);
 }
 
 void Canvas::draw_icon(IconId icon, const RectF& rect, const Color& color) {
     if (icon == IconId::None || rect.empty() || color.a <= 0.0f) {
+        return;
+    }
+
+    if (d2d_ != nullptr) {
+        draw_icon_d2d(icon, rect, color);
         return;
     }
 
@@ -417,7 +507,110 @@ void Canvas::draw_icon(IconId icon, const RectF& rect, const Color& color) {
     }
 }
 
+void Canvas::draw_icon_d2d(IconId icon, const RectF& rect, const Color& color) {
+    const float s = std::min(rect.width, rect.height);
+    const float ox = rect.x + (rect.width - s) * 0.5f;
+    const float oy = rect.y + (rect.height - s) * 0.5f;
+    const auto px = [&](float value) { return ox + value * s; };
+    const auto py = [&](float value) { return oy + value * s; };
+    const float width = std::max(1.2f, s * 0.12f);
+
+    d2d_brush_->SetColor(to_d2d(color));
+
+    const auto line = [&](float x1, float y1, float x2, float y2) {
+        d2d_->DrawLine(D2D1::Point2F(x1, y1), D2D1::Point2F(x2, y2), d2d_brush_.Get(), width, d2d_stroke_.Get());
+    };
+
+    const auto dot = [&](float cx, float cy, float radius) {
+        d2d_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius), d2d_brush_.Get());
+    };
+
+    const auto polyline = [&](std::initializer_list<D2D1_POINT_2F> points, bool close) {
+        Microsoft::WRL::ComPtr<ID2D1Factory> factory;
+        d2d_->GetFactory(factory.ReleaseAndGetAddressOf());
+        Microsoft::WRL::ComPtr<ID2D1PathGeometry> geometry;
+        Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+        if (factory == nullptr || FAILED(factory->CreatePathGeometry(geometry.ReleaseAndGetAddressOf())) ||
+            geometry == nullptr || FAILED(geometry->Open(sink.ReleaseAndGetAddressOf())) || sink == nullptr) {
+            return;
+        }
+
+        auto current = points.begin();
+        if (current != points.end()) {
+            sink->BeginFigure(*current, D2D1_FIGURE_BEGIN_HOLLOW);
+            ++current;
+        }
+
+        for (; current != points.end(); ++current) {
+            sink->AddLine(*current);
+        }
+
+        sink->EndFigure(close ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
+        sink->Close();
+        d2d_->DrawGeometry(geometry.Get(), d2d_brush_.Get(), width, d2d_stroke_.Get());
+    };
+
+    switch (icon) {
+        case IconId::Check:
+            line(px(0.18f), py(0.53f), px(0.42f), py(0.77f));
+            line(px(0.42f), py(0.77f), px(0.82f), py(0.26f));
+            break;
+
+        case IconId::ChevronRight:
+            line(px(0.38f), py(0.22f), px(0.66f), py(0.5f));
+            line(px(0.66f), py(0.5f), px(0.38f), py(0.78f));
+            break;
+
+        case IconId::Close:
+            line(px(0.24f), py(0.24f), px(0.76f), py(0.76f));
+            line(px(0.76f), py(0.24f), px(0.24f), py(0.76f));
+            break;
+
+        case IconId::Info: {
+            const float center_x = ox + s * 0.5f;
+            const float center_y = oy + s * 0.5f;
+            const float radius = s * 0.4f;
+            d2d_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(center_x, center_y), radius, radius), d2d_brush_.Get(),
+                              width, d2d_stroke_.Get());
+            line(px(0.5f), py(0.44f), px(0.5f), py(0.68f));
+            dot(px(0.5f), py(0.3f), s * 0.04f);
+            break;
+        }
+
+        case IconId::Warning:
+            polyline({D2D1::Point2F(px(0.5f), py(0.1f)), D2D1::Point2F(px(0.94f), py(0.86f)),
+                      D2D1::Point2F(px(0.06f), py(0.86f))},
+                     true);
+            line(px(0.5f), py(0.38f), px(0.5f), py(0.61f));
+            dot(px(0.5f), py(0.7f), s * 0.04f);
+            break;
+
+        case IconId::Shield:
+            polyline({D2D1::Point2F(px(0.5f), py(0.07f)), D2D1::Point2F(px(0.87f), py(0.22f)),
+                      D2D1::Point2F(px(0.82f), py(0.6f)), D2D1::Point2F(px(0.5f), py(0.93f)),
+                      D2D1::Point2F(px(0.18f), py(0.6f)), D2D1::Point2F(px(0.13f), py(0.22f))},
+                     true);
+            break;
+
+        case IconId::Download:
+            line(px(0.5f), py(0.14f), px(0.5f), py(0.64f));
+            line(px(0.3f), py(0.45f), px(0.5f), py(0.65f));
+            line(px(0.7f), py(0.45f), px(0.5f), py(0.65f));
+            line(px(0.2f), py(0.84f), px(0.8f), py(0.84f));
+            break;
+
+        case IconId::None:
+            break;
+    }
+}
+
 void Canvas::draw_image(const Gdiplus::Image& image, const RectF& rect) {
+    if (d2d_ != nullptr) {
+        (void)image;  // 硬件路径没有 GDI+ Bitmap；当前控件集不使用图片
+        (void)rect;
+        return;
+    }
+
     if (rect.empty()) {
         return;
     }
@@ -429,11 +622,31 @@ void Canvas::draw_image(const Gdiplus::Image& image, const RectF& rect) {
 void Canvas::push_clip(const RectF& rect) {
     const RectF clip = intersect_rect(current_clip(), rect);
     clip_rects_.push_back(clip);
+
+    if (d2d_ != nullptr) {
+        d2d_->PushAxisAlignedClip(to_d2d(clip), D2D1_ANTIALIAS_MODE_ALIASED);
+        ++d2d_clip_depth_;
+        return;
+    }
+
     clips_.push_back(graphics_->Save());
     graphics_->SetClip(to_gdiplus(clip), Gdiplus::CombineModeIntersect);
 }
 
 void Canvas::pop_clip() {
+    if (d2d_ != nullptr) {
+        if (d2d_clip_depth_ > 0) {
+            d2d_->PopAxisAlignedClip();
+            --d2d_clip_depth_;
+        }
+
+        if (!clip_rects_.empty()) {
+            clip_rects_.pop_back();
+        }
+
+        return;
+    }
+
     if (clips_.empty()) {
         return;
     }
@@ -446,6 +659,16 @@ void Canvas::pop_clip() {
 }
 
 void Canvas::reset_clip() {
+    if (d2d_ != nullptr) {
+        while (d2d_clip_depth_ > 0) {
+            d2d_->PopAxisAlignedClip();
+            --d2d_clip_depth_;
+        }
+
+        clip_rects_.clear();
+        return;
+    }
+
     while (!clips_.empty()) {
         graphics_->Restore(clips_.back());
         clips_.pop_back();
@@ -457,6 +680,12 @@ void Canvas::reset_clip() {
 SizeF Canvas::measure_text(std::wstring_view text, float max_width, const TextStyle& style) {
     if (text.empty()) {
         return {0.0f, line_height(style)};
+    }
+
+    if (d2d_ != nullptr) {
+        // 硬件路径没有 GDI+ 度量；单行宽度走 DWrite，换行由控件自己的行模型处理。
+        (void)max_width;
+        return {measure_text_width(text, style), line_height(style)};
     }
 
     Gdiplus::Font* font = font_for(style);

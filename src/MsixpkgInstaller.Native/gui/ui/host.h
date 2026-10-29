@@ -10,6 +10,7 @@
 #include "canvas.h"
 #include "dwrite_text.h"
 #include "material.h"
+#include "presenter.h"
 #include "theme.h"
 #include "widget.h"
 
@@ -18,11 +19,25 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace msixpkg::ui {
 
-class Presenter;
+/// 一帧的耗时统计。presenter=GPU 时 interval 应当贴着刷新周期，
+/// GDI 路径则会出现 BitBlt 与 WM_TIMER 造成的抖动。
+struct FrameStats {
+    unsigned long long frames = 0;
+    double render_ms = 0.0;      ///< 形状 + 文字（CPU）平均耗时
+    double paint_ms = 0.0;       ///< 形状/清屏/布局平均耗时
+    double text_ms = 0.0;        ///< DirectWrite 文字平均耗时
+    double present_ms = 0.0;     ///< 上屏（Present / BitBlt / UpdateLayeredWindow）平均耗时
+    double interval_ms = 0.0;    ///< 相邻两帧起点的平均间隔
+    double interval_p95_ms = 0.0;
+    double interval_max_ms = 0.0;
+    int dropped = 0;             ///< 动画期间间隔 > 1.5 个 60Hz 周期的次数
+    int refresh_hz = 0;          ///< 由平均间隔反推的刷新率
+};
 
 struct HostOptions {
     std::wstring title = L"Msixpkg";
@@ -59,6 +74,11 @@ public:
     MaterialPreference material_preference() const { return options_.material; }
     void set_material(MaterialPreference preference);
     const wchar_t* presenter_name() const;
+    PresenterKind presenter_kind() const;
+
+    /// 帧耗时统计；`--report` 与 benchmark 用。
+    FrameStats frame_stats() const;
+    void reset_frame_stats();
 
     float dpi() const { return dpi_; }
     float pixels(float dip) const { return dip * dpi_ / 96.0f; }
@@ -69,6 +89,8 @@ public:
     void invalidate(const RectF* dirty = nullptr);
     void set_tick_handler(std::function<void()> handler);
     void set_animating(bool animating, int interval_ms = 33);
+    /// 一次性定时回调（自动开始/自动关闭这类延迟动作），不占动画节拍。
+    void schedule_once(int delay_ms, std::function<void()> callback);
     void layout_changed();
 
     Widget* focused_widget() const { return focused_; }
@@ -103,6 +125,10 @@ private:
     void ensure_frame();
     void render(HDC dc);
     void render_now();
+    void advance_animation();
+    void sync_animation_timer();
+    void record_frame(double start_ms, double paint_done_ms, double raster_done_ms, double end_ms);
+    static double now_ms();
     float scale() const { return dpi_ / 96.0f; }
 
     bool to_dip(WPARAM lparam, float& x, float& y) const;
@@ -126,6 +152,11 @@ private:
     std::unique_ptr<Widget> root_;
 
     std::unique_ptr<Frame> frame_;
+    /// 硬件路径的画布：直接画进 presenter 的 D2D target，不经过 DIB。
+    std::unique_ptr<Canvas> hardware_canvas_;
+    float hardware_canvas_dpi_ = 0.0f;
+    int hardware_canvas_width_ = 0;
+    int hardware_canvas_height_ = 0;
     int client_width_px_ = 0;
     int client_height_px_ = 0;
     float dpi_ = 96.0f;
@@ -134,13 +165,36 @@ private:
     bool refreshing_material_ = false;
     bool ole_initialized_ = false;
     bool animating_ = false;
+    bool animation_timer_active_ = false;
+    int animation_interval_ms_ = 33;
     ULONGLONG last_tick_ms_ = 0;
+
+    // 合成器时钟节拍（180Hz 屏上按 3 个 tick 出一帧 60fps）。
+    double last_clock_ms_ = 0.0;
+    double clock_period_ms_ = 0.0;
+    int clock_ticks_ = 0;
+
+    // 帧统计（最近 kFrameSamples 帧的环形缓冲）。
+    static constexpr size_t kFrameSamples = 240;
+    unsigned long long frames_rendered_ = 0;
+    double last_frame_start_ms_ = 0.0;
+    double interval_max_ms_ = 0.0;
+    int dropped_frames_ = 0;
+    size_t sample_count_ = 0;
+    size_t sample_next_ = 0;
+    double render_samples_[kFrameSamples]{};
+    double paint_samples_[kFrameSamples]{};
+    double text_samples_[kFrameSamples]{};
+    double present_samples_[kFrameSamples]{};
+    double interval_samples_[kFrameSamples]{};
 
     Widget* hovered_ = nullptr;
     Widget* captured_ = nullptr;
     Widget* focused_ = nullptr;
 
     std::function<void()> tick_handler_;
+    std::unordered_map<UINT_PTR, std::function<void()>> one_shot_timers_;
+    UINT_PTR next_timer_id_ = 100;
     AccessiblePtr accessibility_;
     DirectWriteText text_engine_;
     ULONG_PTR gdiplus_token_ = 0;

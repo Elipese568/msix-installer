@@ -23,6 +23,7 @@ set(MSIXPKG_UI_SOURCES
   controls.cpp
   dwrite_text.cpp
   presenter.cpp
+  gpu_presenter.cpp
   material.cpp
   host.cpp
   automation.cpp
@@ -34,12 +35,16 @@ target_include_directories(msixpkg_selfdrawn_ui PUBLIC "${CMAKE_CURRENT_SOURCE_D
 target_compile_definitions(msixpkg_selfdrawn_ui PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(msixpkg_selfdrawn_ui PRIVATE /utf-8 /W4 /permissive- /EHsc /Zc:__cplusplus)
 
-# gdiplus：帧与形状；d2d1/dwrite：灰度文字；dwmapi：材质/深色/圆角；
-# oleacc：LresultFromObject；oleaut32：SysAllocString；advapi32：主题/强调色注册表。
+# gdiplus：帧与形状；d2d1/dwrite：灰度文字；d3d11/dxgi：flip-model 上屏；
+# dwmapi：材质/深色/圆角；oleacc：LresultFromObject；oleaut32：SysAllocString；
+# advapi32：主题/强调色注册表。
 target_link_libraries(msixpkg_selfdrawn_ui PUBLIC
   gdiplus
   d2d1
   dwrite
+  d3d11
+  dcomp
+  dxgi
   dwmapi
   oleacc
   oleaut32

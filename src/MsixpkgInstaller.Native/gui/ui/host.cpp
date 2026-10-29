@@ -4,20 +4,48 @@
 #include "presenter.h"
 
 #include <Windows.h>
+#include <dcomp.h>
 #include <ole2.h>
 #include <oleacc.h>
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <utility>
+#include <vector>
 
 namespace msixpkg::ui {
 namespace {
 
 constexpr UINT_PTR kAnimationTimer = 1;
 constexpr DWORD kWindowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+
+enum class PresenterPreference { Auto, Gdi, Gpu, Layered };
+
+PresenterPreference presenter_preference() {
+    wchar_t value[64]{};
+    const DWORD length = ::GetEnvironmentVariableW(L"MSIXPKG_UI_PRESENTER", value,
+                                                   static_cast<DWORD>(std::size(value)));
+    if (length == 0) {
+        return PresenterPreference::Auto;
+    }
+
+    if (_wcsicmp(value, L"gdi") == 0) {
+        return PresenterPreference::Gdi;
+    }
+
+    if (_wcsicmp(value, L"gpu") == 0 || _wcsicmp(value, L"d3d") == 0) {
+        return PresenterPreference::Gpu;
+    }
+
+    if (_wcsicmp(value, L"layered") == 0) {
+        return PresenterPreference::Layered;
+    }
+
+    return PresenterPreference::Auto;
+}
 
 void collect_entries(Widget& widget, std::vector<Host::AccessibleEntry>& out) {
     if (!widget.visible) {
@@ -39,22 +67,22 @@ void collect_entries(Widget& widget, std::vector<Host::AccessibleEntry>& out) {
     }
 }
 
-bool layered_requested() {
-    wchar_t value[64]{};
-    const DWORD length = ::GetEnvironmentVariableW(L"MSIXPKG_UI_PRESENTER", value,
-                                                   static_cast<DWORD>(std::size(value)));
-    return length > 0 && _wcsicmp(value, L"layered") == 0;
-}
-
 }  // namespace
 
 Host::Host() = default;
 
 Host::~Host() {
-    if (animating_ && hwnd_ != nullptr) {
+    // 交换链/D2D target 要先于窗口和画布释放。
+    hardware_canvas_.reset();
+    text_engine_.reset();
+    presenter_.reset();
+
+    if (animation_timer_active_ && hwnd_ != nullptr) {
         ::KillTimer(hwnd_, kAnimationTimer);
-        animating_ = false;
+        animation_timer_active_ = false;
     }
+
+    animating_ = false;
 
     if (hwnd_ != nullptr) {
         if (::IsWindow(hwnd_) != FALSE) {
@@ -66,9 +94,7 @@ Host::~Host() {
 
     accessibility_.reset();
     root_.reset();
-    presenter_.reset();
     material_.reset();
-    text_engine_.reset();  // D2D target 绑定在 frame 的 DC 上，先解绑
     frame_.reset();
 
     if (ole_initialized_) {
@@ -178,12 +204,108 @@ bool Host::create(HINSTANCE instance, std::unique_ptr<Widget> root, HostOptions 
 
 int Host::run() {
     MSG message{};
-    while (::GetMessageW(&message, nullptr, 0, 0) > 0) {
-        ::TranslateMessage(&message);
-        ::DispatchMessageW(&message);
-    }
 
-    return static_cast<int>(message.wParam);
+    // 有 vsync 句柄时，动画由合成器的帧节拍驱动：等「可以画下一帧」→ tick →
+    // 渲染 → Present(1) 阻塞到垂直同步。没有句柄（GDI/layered）时退化成
+    // 消息循环 + WM_TIMER，和以前一样。
+    for (;;) {
+        if (animating_ && presenter_ != nullptr && presenter_->compositor_paced()) {
+            // 组合交换链的 Present 不反压；等 DWM 的下一个合成时钟，
+            // 既把帧率钉在刷新率，也不让 UI 线程空转。
+            const HRESULT clock_status = ::DCompositionWaitForCompositorClock(0, nullptr, 100);
+
+            bool quitting = false;
+            while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                if (message.message == WM_QUIT) {
+                    quitting = true;
+                    break;
+                }
+
+                ::TranslateMessage(&message);
+                ::DispatchMessageW(&message);
+            }
+
+            if (quitting) {
+                return static_cast<int>(message.wParam);
+            }
+
+            if (FAILED(clock_status)) {
+                ::Sleep(16);  // 没有合成器时钟（旧系统/禁用 DWM）时的兜底节拍
+            }
+
+            // 合成器时钟通常等于显示器刷新率（本机 180Hz）。按测量到的周期
+            // 折算成「每隔几个 tick 出一帧」，既精确落在 vblank 上，又不会
+            // 为了一个进度条按 180fps 空转。
+            const double clock_now = now_ms();
+            if (last_clock_ms_ > 0.0) {
+                const double delta = clock_now - last_clock_ms_;
+                if (delta > 1.0 && delta < 50.0) {
+                    clock_period_ms_ = clock_period_ms_ > 0.0 ? clock_period_ms_ * 0.8 + delta * 0.2 : delta;
+                }
+            }
+            last_clock_ms_ = clock_now;
+
+            if (animating_) {
+                ++clock_ticks_;
+                const int ticks_needed =
+                    clock_period_ms_ > 0.5
+                        ? std::max(1, static_cast<int>(std::lround(
+                                          static_cast<double>(animation_interval_ms_) / clock_period_ms_)))
+                        : 1;
+
+                if (clock_ticks_ >= ticks_needed) {
+                    clock_ticks_ = 0;
+                    advance_animation();
+                }
+            }
+
+            continue;
+        }
+
+        HANDLE handles[1]{};
+        DWORD handle_count = 0;
+        if (animating_ && presenter_ != nullptr) {
+            if (HANDLE wait = presenter_->frame_wait_handle()) {
+                handles[0] = wait;
+                handle_count = 1;
+            }
+        }
+
+        const DWORD result = ::MsgWaitForMultipleObjectsEx(handle_count, handle_count != 0 ? handles : nullptr,
+                                                           INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+
+        if (handle_count == 1 && result == WAIT_OBJECT_0) {
+            advance_animation();
+            continue;
+        }
+
+        if (result == WAIT_OBJECT_0 + handle_count) {
+            bool quitting = false;
+            while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                if (message.message == WM_QUIT) {
+                    quitting = true;
+                    break;
+                }
+
+                ::TranslateMessage(&message);
+                ::DispatchMessageW(&message);
+            }
+
+            if (quitting) {
+                return static_cast<int>(message.wParam);
+            }
+
+            continue;
+        }
+
+        if (result == WAIT_TIMEOUT) {
+            advance_animation();
+            continue;
+        }
+
+        // WAIT_FAILED 或句柄失效：不能再自旋，按退出处理。
+        return exit_code_;
+    }
 }
 
 void Host::quit(int exit_code) {
@@ -210,6 +332,10 @@ void Host::set_material(MaterialPreference preference) {
 
 const wchar_t* Host::presenter_name() const {
     return presenter_ != nullptr ? presenter_->name() : L"-";
+}
+
+PresenterKind Host::presenter_kind() const {
+    return presenter_ != nullptr ? presenter_->kind() : PresenterKind::Gdi;
 }
 
 void Host::refresh_material() {
@@ -267,14 +393,31 @@ void Host::refresh_material() {
     // 分层窗口与标准 caption 不相容：UpdateLayeredWindow 会把 psize 当成**整窗**
     // 尺寸，而帧只有客户区大小。所以分层模式下切到无边框，窗口尺寸 == 帧尺寸；
     // 顶部 40dp 由 WM_NCHITTEST 提供拖动。
-    const bool want_layered = layered_requested() && material_kind_ != MaterialKind::Solid;
+    const PresenterPreference preference = presenter_preference();
+    const bool want_layered = preference == PresenterPreference::Layered && material_kind_ != MaterialKind::Solid;
     apply_window_mode(want_layered);
 
+    // 交换链绑在旧窗口/旧样式上，重建前必须释放。
+    hardware_canvas_.reset();
+    text_engine_.reset();  // 旧 target/brush 属于旧 presenter
+    presenter_.reset();
     if (want_layered) {
         presenter_ = make_layered_presenter(hwnd_);
-    } else {
+    } else if (preference != PresenterPreference::Gdi) {
+        presenter_ = make_gpu_presenter(hwnd_, client_width_px_, client_height_px_);
+    }
+
+    if (presenter_ == nullptr) {
         presenter_ = make_gdi_presenter();
     }
+
+    // 交换链路径会改 WS_EX_NOREDIRECTIONBITMAP / 扩展边框；DWM 的材质属性
+    // 在窗口样式变化后可能被重置，所以在 presenter 建好之后再确认一次。
+    if (material_ != nullptr) {
+        material_->apply(hwnd_, dark);
+    }
+
+    sync_animation_timer();
 
     if (root_ != nullptr) {
         root_->on_theme_changed();
@@ -339,6 +482,12 @@ void Host::invalidate(const RectF* dirty) {
         return;
     }
 
+    if (animating_) {
+        // 动画帧本来就会整帧重绘；tick 里控件 set_value/set_text 的失效
+        // 不必再排一次 WM_PAINT，否则每帧会画两遍。
+        return;
+    }
+
     if (layered_) {
         // 分层窗口不靠 WM_PAINT 上屏，每次失效都要重新 UpdateLayeredWindow。
         render_now();
@@ -375,18 +524,56 @@ void Host::ensure_frame() {
         frame_->resize(width, height, dpi_);
     }
 
+    if (presenter_ != nullptr) {
+        // 交换链要跟客户区同尺寸；否则 DWM 会把旧的 back buffer 拉伸。
+        presenter_->resize(width, height);
+    }
+
     frame_->canvas().set_text_metrics(&text_engine_);
     text_engine_.bind(frame_->memory_dc(), width, height);
 }
 
 void Host::render(HDC dc) {
-    ensure_frame();
-    if (frame_ == nullptr) {
-        return;
+    const double frame_start = now_ms();
+
+    // 设备丢失（驱动更新、RDP 切换、显卡重置）：整条硬件路径退回 GDI，
+    // 至少窗口还能画，不把「黑窗」留给用户。
+    if (presenter_ != nullptr && !presenter_->healthy()) {
+        hardware_canvas_.reset();
+        text_engine_.reset();
+        presenter_ = make_gdi_presenter();
+        sync_animation_timer();
     }
 
-    frame_->clear_transparent();
-    Canvas& canvas = frame_->canvas();
+    bool hardware = false;
+    if (presenter_ != nullptr) {
+        if (ID2D1DeviceContext* d2d = presenter_->d2d_context()) {
+            presenter_->resize(client_width_px_, client_height_px_);
+
+            if (hardware_canvas_ == nullptr || hardware_canvas_width_ != client_width_px_ ||
+                hardware_canvas_height_ != client_height_px_ || std::abs(hardware_canvas_dpi_ - dpi_) > 0.01f) {
+                hardware_canvas_ = std::make_unique<Canvas>(d2d, dpi_, client_width_px_, client_height_px_);
+                hardware_canvas_dpi_ = dpi_;
+                hardware_canvas_width_ = client_width_px_;
+                hardware_canvas_height_ = client_height_px_;
+            }
+
+            if (text_engine_.bind(d2d) && presenter_->begin_frame(dpi_)) {
+                hardware = true;
+            }
+        }
+    }
+
+    if (!hardware) {
+        ensure_frame();
+        if (frame_ == nullptr) {
+            return;
+        }
+
+        frame_->clear_transparent();
+    }
+
+    Canvas& canvas = hardware ? *hardware_canvas_ : frame_->canvas();
 
     canvas.set_defer_text(true);
     canvas.clear_text_commands();
@@ -401,13 +588,28 @@ void Host::render(HDC dc) {
         root_->paint(canvas);
     }
 
+    const double paint_done = now_ms();
+
     // 所有文字走同一个 DirectWrite 灰度 AA 后端：透明与不透明表面、测量与
     // 绘制都来自同一套 layout，不会再出现「两种模式差半个像素」。
-    canvas.flush();
+    // 硬件路径不 Flush GDI+（没有 GDI+ 画布），D2D 批次由 end_frame 提交。
+    if (!hardware) {
+        canvas.flush();
+    }
+
     const auto& commands = canvas.text_commands();
 
     bool rendered = false;
-    if (text_engine_.ready() && text_engine_.begin(dpi_)) {
+    if (hardware) {
+        if (text_engine_.begin(dpi_, false)) {
+            for (const TextCommand& command : commands) {
+                text_engine_.draw(command);
+            }
+
+            text_engine_.end(false);
+            rendered = true;
+        }
+    } else if (text_engine_.ready() && text_engine_.begin(dpi_)) {
         for (const TextCommand& command : commands) {
             text_engine_.draw(command);
         }
@@ -416,7 +618,7 @@ void Host::render(HDC dc) {
         rendered = true;
     }
 
-    if (!rendered) {
+    if (!rendered && !hardware) {
         // DWrite 初始化/绑定失败：退回 GDI+ 灰度 AA，宁可略软也不能没字。
         for (const TextCommand& command : commands) {
             canvas.draw_text_immediate(command.text, command.rect, command.style, command.color, command.clip);
@@ -426,9 +628,15 @@ void Host::render(HDC dc) {
     canvas.clear_text_commands();
     canvas.set_defer_text(false);
 
-    if (presenter_ != nullptr) {
+    const double raster_done = now_ms();
+
+    if (hardware) {
+        presenter_->end_frame();
+    } else if (presenter_ != nullptr) {
         presenter_->present(*frame_, dc);
     }
+
+    record_frame(frame_start, paint_done, raster_done, now_ms());
 }
 
 void Host::render_now() {
@@ -439,6 +647,139 @@ void Host::render_now() {
     HDC dc = ::GetDC(hwnd_);
     render(dc);
     ::ReleaseDC(hwnd_, dc);
+}
+
+double Host::now_ms() {
+    static const double frequency = [] {
+        LARGE_INTEGER value{};
+        ::QueryPerformanceFrequency(&value);
+        return static_cast<double>(value.QuadPart);
+    }();
+
+    LARGE_INTEGER counter{};
+    ::QueryPerformanceCounter(&counter);
+    return static_cast<double>(counter.QuadPart) * 1000.0 / frequency;
+}
+
+void Host::record_frame(double start_ms, double paint_done_ms, double raster_done_ms, double end_ms) {
+    ++frames_rendered_;
+
+    if (last_frame_start_ms_ > 0.0) {
+        const double interval = start_ms - last_frame_start_ms_;
+        if (animating_ && interval > 25.0 && interval < 250.0) {
+            ++dropped_frames_;
+        }
+
+        if (interval < 1000.0 && interval > interval_max_ms_) {
+            interval_max_ms_ = interval;
+        }
+
+        paint_samples_[sample_next_] = paint_done_ms - start_ms;
+        text_samples_[sample_next_] = raster_done_ms - paint_done_ms;
+        render_samples_[sample_next_] = raster_done_ms - start_ms;
+        present_samples_[sample_next_] = end_ms - raster_done_ms;
+        interval_samples_[sample_next_] = interval;
+        sample_next_ = (sample_next_ + 1) % kFrameSamples;
+        sample_count_ = std::min(sample_count_ + 1, kFrameSamples);
+    }
+
+    last_frame_start_ms_ = start_ms;
+}
+
+FrameStats Host::frame_stats() const {
+    FrameStats stats;
+    stats.frames = frames_rendered_;
+    stats.dropped = dropped_frames_;
+    stats.interval_max_ms = interval_max_ms_;
+
+    if (sample_count_ == 0) {
+        return stats;
+    }
+
+    std::vector<double> intervals;
+    intervals.reserve(sample_count_);
+
+    double render_sum = 0.0;
+    double paint_sum = 0.0;
+    double text_sum = 0.0;
+    double present_sum = 0.0;
+    double interval_sum = 0.0;
+    for (size_t index = 0; index < sample_count_; ++index) {
+        render_sum += render_samples_[index];
+        paint_sum += paint_samples_[index];
+        text_sum += text_samples_[index];
+        present_sum += present_samples_[index];
+        interval_sum += interval_samples_[index];
+        intervals.push_back(interval_samples_[index]);
+    }
+
+    const double count = static_cast<double>(sample_count_);
+    stats.render_ms = render_sum / count;
+    stats.paint_ms = paint_sum / count;
+    stats.text_ms = text_sum / count;
+    stats.present_ms = present_sum / count;
+    stats.interval_ms = interval_sum / count;
+
+    std::sort(intervals.begin(), intervals.end());
+    const size_t p95_index = std::min(sample_count_ - 1, static_cast<size_t>(count * 0.95));
+    stats.interval_p95_ms = intervals[p95_index];
+
+    if (stats.interval_ms > 0.0) {
+        stats.refresh_hz = static_cast<int>(std::lround(1000.0 / stats.interval_ms));
+    }
+
+    return stats;
+}
+
+void Host::reset_frame_stats() {
+    frames_rendered_ = 0;
+    last_frame_start_ms_ = 0.0;
+    interval_max_ms_ = 0.0;
+    dropped_frames_ = 0;
+    sample_count_ = 0;
+    sample_next_ = 0;
+}
+
+void Host::advance_animation() {
+    if (hwnd_ == nullptr || ::IsWindow(hwnd_) == FALSE) {
+        return;
+    }
+
+    const ULONGLONG now = ::GetTickCount64();
+    float dt = last_tick_ms_ == 0 ? 0.0f : static_cast<float>(now - last_tick_ms_) / 1000.0f;
+    last_tick_ms_ = now;
+    dt = std::min(dt, 0.25f);
+
+    if (root_ != nullptr) {
+        root_->tick(dt);
+    }
+
+    if (tick_handler_) {
+        tick_handler_();
+    }
+
+    if (hwnd_ == nullptr || ::IsWindow(hwnd_) == FALSE) {
+        return;
+    }
+
+    render_now();
+}
+
+void Host::sync_animation_timer() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+
+    const bool vsync_driven = presenter_ != nullptr && presenter_->frame_wait_handle() != nullptr;
+    const bool want_timer = animating_ && !vsync_driven;
+
+    if (want_timer && !animation_timer_active_) {
+        ::SetTimer(hwnd_, kAnimationTimer, static_cast<UINT>(std::max(8, animation_interval_ms_)), nullptr);
+        animation_timer_active_ = true;
+    } else if (!want_timer && animation_timer_active_) {
+        ::KillTimer(hwnd_, kAnimationTimer);
+        animation_timer_active_ = false;
+    }
 }
 
 bool Host::to_dip(WPARAM lparam, float& x, float& y) const {
@@ -625,17 +966,38 @@ void Host::set_tick_handler(std::function<void()> handler) {
 }
 
 void Host::set_animating(bool animating, int interval_ms) {
-    if (hwnd_ == nullptr || animating_ == animating) {
+    if (hwnd_ == nullptr) {
         return;
     }
 
-    animating_ = animating;
-    if (animating_) {
-        last_tick_ms_ = ::GetTickCount64();
-        ::SetTimer(hwnd_, kAnimationTimer, static_cast<UINT>(std::max(8, interval_ms)), nullptr);
-    } else {
-        ::KillTimer(hwnd_, kAnimationTimer);
+    // 统计从动画开始算起：窗口首帧/材质初始化那几帧的停顿不该混进帧率。
+    if (animating && !animating_) {
+        reset_frame_stats();
     }
+
+    animating_ = animating;
+    animation_interval_ms_ = std::max(8, interval_ms);
+    last_tick_ms_ = ::GetTickCount64();
+    last_clock_ms_ = 0.0;
+    clock_period_ms_ = 0.0;
+    clock_ticks_ = 0;
+    sync_animation_timer();
+
+    if (animating_ && hwnd_ != nullptr) {
+        // 合成器节拍由 run() 的 wait 驱动；这里发一条空消息把可能阻塞在
+        // MsgWaitForMultipleObjectsEx 的主循环叫醒，否则第一帧要等下一次输入。
+        ::PostMessageW(hwnd_, WM_NULL, 0, 0);
+    }
+}
+
+void Host::schedule_once(int delay_ms, std::function<void()> callback) {
+    if (hwnd_ == nullptr || !callback) {
+        return;
+    }
+
+    const UINT_PTR id = next_timer_id_++;
+    one_shot_timers_[id] = std::move(callback);
+    ::SetTimer(hwnd_, id, static_cast<UINT>(std::max(1, delay_ms)), nullptr);
 }
 
 void Host::layout_changed() {
@@ -943,17 +1305,16 @@ LRESULT Host::handle(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
 
         case WM_TIMER:
             if (wparam == kAnimationTimer) {
-                const ULONGLONG now = ::GetTickCount64();
-                float dt = last_tick_ms_ == 0 ? 0.0f : static_cast<float>(now - last_tick_ms_) / 1000.0f;
-                last_tick_ms_ = now;
-                dt = std::min(dt, 0.25f);
+                advance_animation();
+                return 0;
+            }
 
-                if (root_ != nullptr) {
-                    root_->tick(dt);
-                }
-
-                if (tick_handler_) {
-                    tick_handler_();
+            if (const auto found = one_shot_timers_.find(wparam); found != one_shot_timers_.end()) {
+                ::KillTimer(hwnd_, wparam);
+                auto callback = std::move(found->second);
+                one_shot_timers_.erase(found);
+                if (callback) {
+                    callback();
                 }
 
                 return 0;
@@ -978,11 +1339,20 @@ LRESULT Host::handle(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
 
         case WM_DESTROY:
-            if (animating_) {
+            if (animation_timer_active_) {
                 ::KillTimer(hwnd_, kAnimationTimer);
-                animating_ = false;
+                animation_timer_active_ = false;
             }
 
+            for (const auto& timer : one_shot_timers_) {
+                ::KillTimer(hwnd_, timer.first);
+            }
+            one_shot_timers_.clear();
+
+            animating_ = false;
+            hardware_canvas_.reset();
+            text_engine_.reset();
+            presenter_.reset();  // 交换链/组合 target 绑定在即将消失的 HWND 上
             hwnd_ = nullptr;
             ::PostQuitMessage(exit_code_);
             return 0;

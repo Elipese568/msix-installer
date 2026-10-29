@@ -14,6 +14,8 @@
 #include <objidl.h>
 
 #include <gdiplus.h>
+#include <d2d1_1.h>
+#include <wrl/client.h>
 
 #include <cstdint>
 #include <memory>
@@ -117,10 +119,15 @@ public:
 class Canvas {
 public:
     Canvas(Gdiplus::Bitmap& bitmap, float dpi, int width_px, int height_px);
+    /// D2D 硬件后端：形状直接画进 presenter 的 D2D 设备上下文（交换链 back buffer）。
+    /// target 由调用方拥有，Canvas 只借用；文字仍由 DirectWriteText 画到同一个 target。
+    Canvas(ID2D1DeviceContext* target, float dpi, int width_px, int height_px);
     ~Canvas();
 
     Canvas(const Canvas&) = delete;
     Canvas& operator=(const Canvas&) = delete;
+
+    bool hardware() const { return d2d_ != nullptr; }
 
     void set_dpi(float dpi);
     float dpi() const { return dpi_; }
@@ -163,8 +170,13 @@ private:
     Gdiplus::StringFormat* measure_format(bool wrap);
     float line_ratio(const TextStyle& style);
     RectF current_clip() const;
+    void draw_icon_d2d(IconId icon, const RectF& rect, const Color& color);
 
     std::unique_ptr<Gdiplus::Graphics> graphics_;
+    ID2D1DeviceContext* d2d_ = nullptr;  // 非拥有
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> d2d_brush_;
+    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> d2d_stroke_;
+    size_t d2d_clip_depth_ = 0;
     float dpi_ = 96.0f;
     TextMetrics* metrics_ = nullptr;
     int width_px_ = 0;
@@ -199,6 +211,9 @@ public:
 
     HDC memory_dc() const { return memory_dc_; }
     HBITMAP dib() const { return dib_; }
+    /// 预乘 alpha 的 BGRA 像素，自上而下，行距 width_px() * 4。
+    /// GPU 呈现要把它整块拷进交换链的 staging 纹理。
+    const void* bits() const { return bits_; }
 
     /// 整帧清成 alpha=0（SourceCopy）。Mica/Acrylic 下这就是「透出材质」。
     void clear_transparent();

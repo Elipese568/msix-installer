@@ -30,13 +30,16 @@ public:
     bool initialize();
     /// 把 D2D DC 渲染目标绑到帧的 DIB。尺寸/DC 不变时是空操作。
     bool bind(HDC memory_dc, int width_px, int height_px);
+    /// 绑定 presenter 的 D2D 设备上下文（硬件路径）。借用，不拥有。
+    bool bind(ID2D1RenderTarget* target);
     void reset();
 
-    bool begin(float dpi);
+    /// begin_draw=false 时由 presenter 统一 BeginDraw/EndDraw（形状 + 文字同批）。
+    bool begin(float dpi, bool begin_draw = true);
     void draw(const TextCommand& command);
-    void end();
+    void end(bool end_draw = true);
 
-    bool ready() const { return target_ != nullptr; }
+    bool ready() const { return rt_ != nullptr; }
 
     float measure_width(std::wstring_view text, const TextStyle& style, float dpi) override;
     float line_height(const TextStyle& style, float dpi) override;
@@ -52,7 +55,9 @@ private:
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_factory_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_factory_;
-    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> target_;
+    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> dc_target_;
+    /// 当前实际绘制目标：DC 路径是 dc_target_.Get()，硬件路径是 presenter 的 context。
+    ID2D1RenderTarget* rt_ = nullptr;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_;
     std::unordered_map<std::wstring, FormatEntry> formats_;
     std::unordered_map<std::wstring, float> line_heights_;
@@ -60,6 +65,7 @@ private:
     int width_px_ = 0;
     int height_px_ = 0;
     bool drawing_ = false;
+    bool owns_draw_ = true;  ///< begin_draw=false 时由 presenter 负责 BeginDraw/EndDraw
 };
 
 }  // namespace msixpkg::ui

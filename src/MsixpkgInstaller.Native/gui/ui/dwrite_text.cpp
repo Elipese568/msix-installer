@@ -1,4 +1,4 @@
-﻿#include "dwrite_text.h"
+#include "dwrite_text.h"
 
 #include <algorithm>
 #include <cmath>
@@ -66,7 +66,7 @@ bool DirectWriteText::initialize() {
 
 bool DirectWriteText::bind(HDC memory_dc, int width_px, int height_px) {
     if (memory_dc != nullptr && memory_dc == bound_dc_ && width_px == width_px_ &&
-        height_px == height_px_ && target_ != nullptr) {
+        height_px == height_px_ && dc_target_ != nullptr) {
         return true;
     }
 
@@ -79,34 +79,63 @@ bool DirectWriteText::bind(HDC memory_dc, int width_px, int height_px) {
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
 
-    if (FAILED(d2d_factory_->CreateDCRenderTarget(&properties, target_.ReleaseAndGetAddressOf()))) {
+    if (FAILED(d2d_factory_->CreateDCRenderTarget(&properties, dc_target_.ReleaseAndGetAddressOf()))) {
         reset();
         return false;
     }
 
     RECT rect{0, 0, width_px, height_px};
-    if (FAILED(target_->BindDC(memory_dc, &rect))) {
+    if (FAILED(dc_target_->BindDC(memory_dc, &rect))) {
         reset();
         return false;
     }
 
-    if (FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f),
-                                         brush_.ReleaseAndGetAddressOf()))) {
+    if (FAILED(dc_target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f),
+                                                 brush_.ReleaseAndGetAddressOf()))) {
         reset();
         return false;
     }
 
-    target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    dc_target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    dc_target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
+    rt_ = dc_target_.Get();
     bound_dc_ = memory_dc;
     width_px_ = width_px;
     height_px_ = height_px;
     return true;
 }
 
+bool DirectWriteText::bind(ID2D1RenderTarget* target) {
+    if (target == nullptr) {
+        return false;
+    }
+
+    if (target == rt_ && brush_ != nullptr) {
+        return true;
+    }
+
+    reset();
+    if (!initialize()) {
+        return false;
+    }
+
+    if (FAILED(target->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f),
+                                            brush_.ReleaseAndGetAddressOf()))) {
+        reset();
+        return false;
+    }
+
+    target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+    rt_ = target;
+    return true;
+}
+
 void DirectWriteText::reset() {
-    target_.Reset();
+    dc_target_.Reset();
+    rt_ = nullptr;
     brush_.Reset();
     bound_dc_ = nullptr;
     width_px_ = 0;
@@ -164,23 +193,26 @@ DirectWriteText::FormatEntry* DirectWriteText::entry_for(const TextStyle& style)
     return &inserted.first->second;
 }
 
-bool DirectWriteText::begin(float dpi) {
-    if (target_ == nullptr || drawing_) {
+bool DirectWriteText::begin(float dpi, bool begin_draw) {
+    if (rt_ == nullptr || drawing_) {
         return false;
     }
 
-    target_->BeginDraw();
+    if (begin_draw) {
+        rt_->BeginDraw();
+    }
 
     const float scale = dpi > 0.0f ? dpi / 96.0f : 1.0f;
-    target_->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
-    target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    rt_->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+    rt_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    rt_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    owns_draw_ = begin_draw;
     drawing_ = true;
     return true;
 }
 
 void DirectWriteText::draw(const TextCommand& command) {
-    if (!drawing_ || dwrite_factory_ == nullptr || target_ == nullptr || command.text.empty() ||
+    if (!drawing_ || dwrite_factory_ == nullptr || rt_ == nullptr || command.text.empty() ||
         command.rect.empty()) {
         return;
     }
@@ -207,24 +239,28 @@ void DirectWriteText::draw(const TextCommand& command) {
 
     const bool clipped = !command.clip.empty();
     if (clipped) {
-        target_->PushAxisAlignedClip(to_rect(command.clip), D2D1_ANTIALIAS_MODE_ALIASED);
+        rt_->PushAxisAlignedClip(to_rect(command.clip), D2D1_ANTIALIAS_MODE_ALIASED);
     }
 
-    target_->DrawTextLayout(D2D1::Point2F(command.rect.x, command.rect.y), layout.Get(), brush_.Get(),
-                            D2D1_DRAW_TEXT_OPTIONS_NONE);
+    rt_->DrawTextLayout(D2D1::Point2F(command.rect.x, command.rect.y), layout.Get(), brush_.Get(),
+                        D2D1_DRAW_TEXT_OPTIONS_NONE);
 
     if (clipped) {
-        target_->PopAxisAlignedClip();
+        rt_->PopAxisAlignedClip();
     }
 }
 
-void DirectWriteText::end() {
-    if (!drawing_ || target_ == nullptr) {
+void DirectWriteText::end(bool end_draw) {
+    if (!drawing_ || rt_ == nullptr) {
         drawing_ = false;
         return;
     }
 
-    const HRESULT status = target_->EndDraw();
+    HRESULT status = S_OK;
+    if (end_draw && owns_draw_) {
+        status = rt_->EndDraw();
+    }
+
     drawing_ = false;
     if (status == D2DERR_RECREATE_TARGET) {
         reset();

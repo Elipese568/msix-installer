@@ -18,9 +18,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -100,11 +102,8 @@ struct DemoApp {
     ProgressBar* progress = nullptr;
 
     int progress_value = 0;
+    float progress_accum = 0.0f;
     bool installing = false;
-    bool auto_start = false;
-    bool auto_started = false;
-    ULONGLONG created_at = 0;
-    ULONGLONG auto_close_at = 0;
     ULONGLONG last_tick = 0;
 
     void refresh_badge() {
@@ -131,6 +130,8 @@ struct DemoApp {
 
         installing = true;
         progress_value = 0;
+        progress_accum = 0.0f;
+        last_tick = 0;
         if (progress != nullptr) {
             progress->set_value(0);
         }
@@ -145,10 +146,19 @@ struct DemoApp {
         }
 
         set_status(L"正在校验容器 …");
+
+        // 只在安装期间跑帧；空闲时窗口不重绘，CPU 占用回到 0。
+        if (host != nullptr) {
+            host->set_animating(true, 16);
+        }
     }
 
     void finish_install() {
         installing = false;
+        if (host != nullptr) {
+            host->set_animating(false);
+        }
+
         if (start != nullptr) {
             start->enabled = true;
             start->invalidate();
@@ -160,6 +170,12 @@ struct DemoApp {
     void reset() {
         installing = false;
         progress_value = 0;
+        progress_accum = 0.0f;
+        last_tick = 0;
+        if (host != nullptr) {
+            host->set_animating(false);
+        }
+
         if (progress != nullptr) {
             progress->set_value(0);
         }
@@ -201,46 +217,54 @@ struct DemoApp {
     }
 
     void tick() {
+        if (!installing) {
+            return;
+        }
+
         const ULONGLONG now = ::GetTickCount64();
         const float dt = last_tick == 0 ? 0.0f : static_cast<float>(now - last_tick) / 1000.0f;
         last_tick = now;
 
-        if (auto_start && !auto_started) {
-            // 给窗口一点时间上屏，截图/人眼都能看到初始状态。
-            if (now - created_at > 700) {
-                auto_started = true;
-                begin_install();
-            }
+        // 浮点累加再取整：60fps 下每帧增量不到 1%，直接取整会永远停在 0%。
+        progress_accum = std::min(100.0f, progress_accum + dt * 26.0f);
+        progress_value = static_cast<int>(progress_accum);
+        if (progress != nullptr) {
+            progress->set_value(progress_value);
         }
 
-        if (installing) {
-            progress_value = std::min(100, progress_value + static_cast<int>(dt * 26.0f));
-            if (progress != nullptr) {
-                progress->set_value(progress_value);
-            }
-
-            if (percent != nullptr) {
-                percent->set_text(std::to_wstring(progress_value) + L"%");
-            }
-
-            if (progress_value < 20) {
-                set_status(L"正在校验容器与签名 …");
-            } else if (progress_value < 40) {
-                set_status(L"正在导入发布者证书 …");
-            } else if (progress_value < 85) {
-                set_status(L"正在安装 MSIX 包 …");
-            } else if (progress_value < 100) {
-                set_status(L"正在回收旧版本 …");
-            } else {
-                finish_install();
-            }
+        if (percent != nullptr) {
+            percent->set_text(std::to_wstring(progress_value) + L"%");
         }
 
-        if (auto_close_at != 0 && now >= auto_close_at && host != nullptr) {
-            host->close();
+        if (progress_value < 20) {
+            set_status(L"正在校验容器与签名 …");
+        } else if (progress_value < 40) {
+            set_status(L"正在导入发布者证书 …");
+        } else if (progress_value < 85) {
+            set_status(L"正在安装 MSIX 包 …");
+        } else if (progress_value < 100) {
+            set_status(L"正在回收旧版本 …");
+        } else {
+            finish_install();
         }
     }
 };
+
+const wchar_t* presenter_kind_name(PresenterKind kind) {
+    switch (kind) {
+        case PresenterKind::Gpu: return L"Gpu";
+        case PresenterKind::Layered: return L"Layered";
+        case PresenterKind::Gdi: return L"Gdi";
+    }
+
+    return L"Gdi";
+}
+
+std::wstring format_ms(double value) {
+    wchar_t buffer[32]{};
+    ::swprintf_s(buffer, L"%.2f", value);
+    return buffer;
+}
 
 void write_report(Host& host, const std::wstring& path) {
     std::wstring content;
@@ -253,6 +277,8 @@ void write_report(Host& host, const std::wstring& path) {
     line(L"appearance=" + std::wstring(appearance_name(host.appearance())));
     line(L"material=" + std::wstring(material_name(host.material_kind())));
     line(L"presenter=" + std::wstring(host.presenter_name()));
+    line(L"presenter.kind=" + std::wstring(presenter_kind_name(host.presenter_kind())));
+    line(L"presenter.vsync=" + std::to_wstring(host.presenter_kind() == PresenterKind::Gpu ? 1 : 0));
     line(L"dpi=" + std::to_wstring(static_cast<int>(host.dpi() + 0.5f)));
     line(L"client=" + std::to_wstring(host.client_width_px()) + L"x" + std::to_wstring(host.client_height_px()));
     line(L"ui.entries=" + std::to_wstring(host.accessible_entries().size()));
@@ -329,6 +355,18 @@ void write_report(Host& host, const std::wstring& path) {
 
     line(L"wm_getobject_after=" + std::to_wstring(host.accessibility_request_count()));
 
+    const FrameStats stats = host.frame_stats();
+    line(L"frames=" + std::to_wstring(stats.frames));
+    line(L"frame.render_ms=" + format_ms(stats.render_ms));
+    line(L"frame.paint_ms=" + format_ms(stats.paint_ms));
+    line(L"frame.text_ms=" + format_ms(stats.text_ms));
+    line(L"frame.present_ms=" + format_ms(stats.present_ms));
+    line(L"frame.interval_ms=" + format_ms(stats.interval_ms));
+    line(L"frame.p95_ms=" + format_ms(stats.interval_p95_ms));
+    line(L"frame.max_ms=" + format_ms(stats.interval_max_ms));
+    line(L"frame.dropped=" + std::to_wstring(stats.dropped));
+    line(L"frame.refresh_hz=" + std::to_wstring(stats.refresh_hz));
+
     std::ofstream stream(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
     if (stream.is_open()) {
         const std::string utf8 = to_utf8(content);
@@ -340,6 +378,7 @@ struct Settings {
     std::wstring report_path;
     std::wstring theme = L"auto";
     std::wstring material = L"auto";
+    std::wstring presenter;  // gpu / gdi / layered；空 = 默认（GPU 优先）
     bool auto_start = false;
     ULONGLONG exit_after_ms = 0;
 };
@@ -366,6 +405,8 @@ Settings parse_settings() {
             next(settings.theme);
         } else if (token == L"--material") {
             next(settings.material);
+        } else if (token == L"--presenter") {
+            next(settings.presenter);
         } else if (token == L"--auto") {
             settings.auto_start = true;
         } else if (token == L"--exit-after") {
@@ -384,6 +425,10 @@ Settings parse_settings() {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     const Settings settings = parse_settings();
 
+    if (!settings.presenter.empty()) {
+        ::SetEnvironmentVariableW(L"MSIXPKG_UI_PRESENTER", settings.presenter.c_str());
+    }
+
     const Theme base = make_theme(Appearance::Light, false);
     auto root = std::make_unique<Panel>();
     root->bounds = {0.0f, 0.0f, 760.0f, 620.0f};
@@ -392,14 +437,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     // ---- 顶部标题 ----
     auto* title = root->emplace<Label>(L"全自绘 UI 框架", base.title);
-    title->bounds = {18.0f, 12.0f, 500.0f, 32.0f};
+    title->bounds = {18.0f, 12.0f, 330.0f, 32.0f};
 
-    auto* subtitle = root->emplace<Label>(L"GDI+ · 单 HWND · Mica / Acrylic / Solid · MSAA", base.caption);
-    subtitle->bounds = {18.0f, 46.0f, 520.0f, 18.0f};
+    auto* subtitle = root->emplace<Label>(L"D2D 形状 · DWrite 文字 · DComp 上屏 · MSAA", base.caption);
+    subtitle->bounds = {18.0f, 46.0f, 330.0f, 18.0f};
     subtitle->set_tone(LabelTone::Secondary);
 
     app.badge = root->emplace<Label>(L"", base.caption);
-    app.badge->bounds = {500.0f, 16.0f, 242.0f, 20.0f};
+    app.badge->bounds = {340.0f, 16.0f, 402.0f, 20.0f};
     app.badge->set_tone(LabelTone::Secondary);
     app.badge->set_align(TextAlign::Right);
     app.badge->set_ellipsis(true);
@@ -565,12 +610,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return 1;
     }
 
-    app.auto_start = settings.auto_start;
-    app.auto_started = false;
-    app.created_at = ::GetTickCount64();
-    app.last_tick = app.created_at;
     app.refresh_badge();
-
     if (host.appearance() == Appearance::Dark) {
         app.theme_button->text = L"切换到浅色";
     }
@@ -586,26 +626,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     });
 
     host.set_tick_handler([&app] { app.tick(); });
-    host.set_animating(true, 33);
 
     if (!settings.report_path.empty()) {
         write_report(host, settings.report_path);
     }
 
-    if (settings.auto_start || settings.exit_after_ms > 0) {
-        // 不引入额外线程：tick 里按时间决定自动开始/退出。
-        app.last_tick = ::GetTickCount64();
-        if (settings.exit_after_ms > 0) {
-            app.auto_close_at = ::GetTickCount64() + settings.exit_after_ms;
-        }
+    // 一次性定时器：空闲时不跑动画，CPU 占用为 0。
+    if (settings.auto_start) {
+        host.schedule_once(700, [&app] { app.begin_install(); });
     }
 
-    MSG message{};
-    while (::GetMessageW(&message, nullptr, 0, 0) > 0) {
-        ::TranslateMessage(&message);
-        ::DispatchMessageW(&message);
+    if (settings.exit_after_ms > 0) {
+        host.schedule_once(static_cast<int>(settings.exit_after_ms), [&host, &settings] {
+            if (!settings.report_path.empty()) {
+                write_report(host, settings.report_path);
+            }
+
+            host.close();
+        });
     }
 
-    host.set_animating(false);
-    return 0;
+    // run() 在有 vsync 句柄时按合成器节拍驱动动画；否则回到 WM_TIMER。
+    return host.run();
 }

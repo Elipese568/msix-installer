@@ -5,6 +5,7 @@ namespace {
 
 class GdiPresenter final : public Presenter {
 public:
+    PresenterKind kind() const override { return PresenterKind::Gdi; }
     const wchar_t* name() const override { return L"GDI SourceCopy"; }
 
     void present(const Frame& frame, HDC dc) override {
@@ -26,6 +27,7 @@ class LayeredPresenter final : public Presenter {
 public:
     explicit LayeredPresenter(HWND hwnd) : hwnd_(hwnd) {}
 
+    PresenterKind kind() const override { return PresenterKind::Layered; }
     const wchar_t* name() const override { return L"UpdateLayeredWindow"; }
 
     void present(const Frame& frame, HDC dc) override {

@@ -104,10 +104,13 @@ DWM / Win32                                  （窗口、材质、输入）
 ```
 src/MsixpkgInstaller.Native/gui/
   ui/
-    canvas.h/.cpp          GDI+ Canvas、Frame、字体缓存、颜色、裁剪
+    canvas.h/.cpp          Canvas（D2D / GDI+ 双后端）、Frame、颜色、裁剪
+    dwrite_text.h/.cpp     DirectWrite 灰度 AA 文字（D2D 设备上下文 / DIB 两个 target）
+    text_layout.h/.cpp     CJK 逐字 + 拉丁按词换行
     widget.h/.cpp          Widget、Panel、事件、命中测试
-    host.h/.cpp            HWND、消息循环、双缓冲、焦点、失效
+    host.h/.cpp            HWND、合成器节拍、焦点、失效、帧统计
     presenter.h/.cpp       Presenter 接口 + GdiPresenter/LayeredPresenter
+    gpu_presenter.cpp      D3D11 + DirectComposition 交换链、D2D target
     material.h/.cpp        Material 接口 + Mica/Acrylic/Solid
     theme.h/.cpp           Light/Dark/HighContrast、强调色、字号、间距
     controls.h/.cpp        Label/Button/Checkbox/ProgressBar/TextView/Table/ScrollBar
@@ -257,6 +260,16 @@ screen.DrawImage(frame.bitmap(), 0, 0);
 - 双缓冲：先画到 `Frame`，再一次性 present；不要在 `WM_PAINT` 里边画边显示。
 - 只重画脏区是优化，不是第一版必需；720×480 全量重画成本很低。
 - 进度/动画用 `InvalidateRect` 驱动，不做 60fps 常驻循环；不可见时停 timer。
+
+> **实现记录（2026-10-29，GPU 路径）**：默认呈现已改为 D3D11 +
+> DirectComposition：`CreateSwapChainForComposition`（预乘 alpha）→
+> `IDCompositionVisual` → DWM；D2D 把形状/图标/文字画到一张普通渲染目标纹理，
+> `CopyResource` 到 back buffer 后 `Present(1)` + `Commit`。`CreateSwapChainForHwnd`
+> 不接受 `DXGI_ALPHA_MODE_PREMULTIPLIED`（实测 `DXGI_ERROR_INVALID_CALL`），
+> 所以带 alpha 的交换链不能省掉 DComp。Host 用
+> `DCompositionWaitForCompositorClock` 驱动动画，并把 60fps 折算成「每 N 个
+> 合成 tick 一帧」；空闲时完全不跑帧。GDI+ DIB + `SourceCopy` 保留为回退。
+> 760×620 实测：paint 从 ~14ms 降到 <0.2ms，动画期 CPU 从 ~70% 降到 ~20%。
 
 ### 3.3 文字
 
@@ -414,6 +427,11 @@ Mica 的 alpha 依赖 26100+ 的 `DWMWA_REDIRECTIONBITMAP_ALPHA`；Win10 没有�
 - 透明交换链 + Acrylic；Win11 22H2+ 也可以顺便上 Mica；
 - 渲染不再是纯 GDI+，成本 +1–2 周；
 - 如果 A/B 都不行，这是可靠退路。
+
+> **实现记录（2026-10-29）**：方案 C 已落地为默认路径（D3D11 + DComp + D2D），
+> 透明/材质表现与 GDI+ 路径一致；Win11 Mica 仍按 §4.3 的属性 38/39 走。Win10
+> 的 Acrylic 在 DComp 内容下尚未单独验证，失败时仍自动退回 GDI+ + Solid。
+> 方案 B（layered）保留为 opt-in。
 
 **判定标准**：Win10 22H2 干净 VM，浅色/深色各一张截图；材质可见、文字可读、无黑块/白块、拖动不严重闪烁；关闭透明效果后自动 Solid。
 
