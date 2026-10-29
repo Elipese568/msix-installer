@@ -8,7 +8,7 @@
 
 #include "automation.h"
 #include "canvas.h"
-#include "gdi_text.h"
+#include "dwrite_text.h"
 #include "material.h"
 #include "theme.h"
 #include "widget.h"
@@ -142,7 +142,7 @@ private:
 
     std::function<void()> tick_handler_;
     AccessiblePtr accessibility_;
-    GdiTextRenderer gdi_text_;
+    DirectWriteText text_engine_;
     ULONG_PTR gdiplus_token_ = 0;
     bool gdiplus_ready_ = false;
     int exit_code_ = 0;

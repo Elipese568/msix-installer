@@ -110,20 +110,16 @@ Gdiplus::Color Color::to_gdiplus() const {
 // Canvas
 // ============================================================================
 
-Canvas::Canvas(Gdiplus::Bitmap& bitmap, float dpi, uint8_t* pixels, int stride_bytes, int width_px,
-               int height_px)
+Canvas::Canvas(Gdiplus::Bitmap& bitmap, float dpi, int width_px, int height_px)
     : graphics_(std::make_unique<Gdiplus::Graphics>(&bitmap)),
       dpi_(dpi > 0.0f ? dpi : 96.0f),
-      pixels_(pixels),
-      stride_bytes_(stride_bytes),
       width_px_(width_px),
       height_px_(height_px) {
     graphics_->SetPageUnit(Gdiplus::UnitPixel);
     graphics_->SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     graphics_->SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
-    // GDI+ 的 ClearType 在预乘 alpha 位图上会出彩边/重影（实测），这里只用灰度
-    // AA；真正清晰的文字由 Host 在不透明表面上用 GDI ClearType 回放
-    // （docs/self-drawn-ui-framework.md §3.3 方案一）。
+    // 文字默认由 DirectWrite 灰度 AA 绘制（单一后端，位置一致）；这里的 GDI+
+    // 文字只在 DWrite 初始化失败时兜底。
     graphics_->SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
     graphics_->SetCompositingMode(Gdiplus::CompositingModeSourceOver);
     graphics_->SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
@@ -340,49 +336,6 @@ RectF Canvas::current_clip() const {
     return {0.0f, 0.0f, static_cast<float>(width_px_) / scale, static_cast<float>(height_px_) / scale};
 }
 
-uint8_t Canvas::min_alpha(const RectF& dip_rect) const {
-    if (pixels_ == nullptr || stride_bytes_ <= 0 || width_px_ <= 0 || height_px_ <= 0) {
-        return 255;
-    }
-
-    const float scale = dpi_ / 96.0f;
-    const int x0 = std::clamp(static_cast<int>(std::floor(dip_rect.x * scale)), 0, width_px_ - 1);
-    const int y0 = std::clamp(static_cast<int>(std::floor(dip_rect.y * scale)), 0, height_px_ - 1);
-    const int x1 = std::clamp(static_cast<int>(std::ceil(dip_rect.right() * scale)), x0 + 1, width_px_);
-    const int y1 = std::clamp(static_cast<int>(std::ceil(dip_rect.bottom() * scale)), y0 + 1, height_px_);
-
-    uint8_t minimum = 255;
-    for (int row = 0; row < 3; ++row) {
-        const int y = y0 + (y1 - y0 - 1) * row / 2;
-        const uint8_t* line = pixels_ + static_cast<size_t>(y) * static_cast<size_t>(stride_bytes_);
-        for (int column = 0; column < 5; ++column) {
-            const int x = x0 + (x1 - x0 - 1) * column / 4;
-            minimum = std::min(minimum, line[static_cast<size_t>(x) * 4 + 3]);
-        }
-    }
-
-    return minimum;
-}
-
-void Canvas::make_opaque(const RectF& dip_rect) {
-    if (pixels_ == nullptr || stride_bytes_ <= 0 || width_px_ <= 0 || height_px_ <= 0) {
-        return;
-    }
-
-    const float scale = dpi_ / 96.0f;
-    const int x0 = std::clamp(static_cast<int>(std::floor(dip_rect.x * scale)) - 1, 0, width_px_);
-    const int y0 = std::clamp(static_cast<int>(std::floor(dip_rect.y * scale)) - 1, 0, height_px_);
-    const int x1 = std::clamp(static_cast<int>(std::ceil(dip_rect.right() * scale)) + 1, 0, width_px_);
-    const int y1 = std::clamp(static_cast<int>(std::ceil(dip_rect.bottom() * scale)) + 1, 0, height_px_);
-
-    for (int y = y0; y < y1; ++y) {
-        uint8_t* line = pixels_ + static_cast<size_t>(y) * static_cast<size_t>(stride_bytes_);
-        for (int x = x0; x < x1; ++x) {
-            line[static_cast<size_t>(x) * 4 + 3] = 255;
-        }
-    }
-}
-
 void Canvas::flush() {
     graphics_->Flush(Gdiplus::FlushIntentionSync);
 }
@@ -520,6 +473,10 @@ float Canvas::measure_text_width(std::wstring_view text, const TextStyle& style)
         return 0.0f;
     }
 
+    if (metrics_ != nullptr) {
+        return metrics_->measure_width(text, style, dpi_);
+    }
+
     Gdiplus::Font* font = font_for(style);
     Gdiplus::StringFormat* format = measure_format(false);
     Gdiplus::RectF layout(0.0f, 0.0f, 1000000.0f, 1000000.0f);
@@ -529,6 +486,10 @@ float Canvas::measure_text_width(std::wstring_view text, const TextStyle& style)
 }
 
 float Canvas::line_height(const TextStyle& style) {
+    if (metrics_ != nullptr) {
+        return metrics_->line_height(style, dpi_);
+    }
+
     return style.size * line_ratio(style);
 }
 
@@ -581,8 +542,7 @@ void Frame::create(int width_px, int height_px, float dpi) {
         return;
     }
 
-    canvas_ = std::make_unique<Canvas>(*bitmap_, dpi_, static_cast<uint8_t*>(bits_), width_px_ * 4, width_px_,
-                                       height_px_);
+    canvas_ = std::make_unique<Canvas>(*bitmap_, dpi_, width_px_, height_px_);
 }
 
 void Frame::destroy() {

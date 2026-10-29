@@ -68,6 +68,7 @@ Host::~Host() {
     root_.reset();
     presenter_.reset();
     material_.reset();
+    text_engine_.reset();  // D2D target 绑定在 frame 的 DC 上，先解绑
     frame_.reset();
 
     if (ole_initialized_) {
@@ -115,6 +116,9 @@ bool Host::create(HINSTANCE instance, std::unique_ptr<Widget> root, HostOptions 
     }
 
     gdiplus_ready_ = true;
+
+    // 文字统一走 DirectWrite 灰度 AA；初始化失败时 Canvas 会退回 GDI+ 灰度。
+    text_engine_.initialize();
 
     // MSAA 服务端（LresultFromObject）要求 UI 线程初始化过 OLE 公寓；
     // 调用方已经初始化时 OleInitialize 返回 S_FALSE，仍然计入引用。
@@ -370,6 +374,9 @@ void Host::ensure_frame() {
     } else {
         frame_->resize(width, height, dpi_);
     }
+
+    frame_->canvas().set_text_metrics(&text_engine_);
+    text_engine_.bind(frame_->memory_dc(), width, height);
 }
 
 void Host::render(HDC dc) {
@@ -394,49 +401,25 @@ void Host::render(HDC dc) {
         root_->paint(canvas);
     }
 
-    // 文字分两路回放：
-    //   1) 背景透明（直接贴在 Mica/Acrylic 上）→ GDI+ 灰度 AA，写进帧的 alpha；
-    //   2) 背景不透明（卡片/控件/表格）→ GDI ClearType，子像素渲染，清晰度与
-    //      标准 Win32 控件一致。
-    // 采样必须在任何文字真正落笔之前完成，否则会把上一轮文字算进背景。
+    // 所有文字走同一个 DirectWrite 灰度 AA 后端：透明与不透明表面、测量与
+    // 绘制都来自同一套 layout，不会再出现「两种模式差半个像素」。
     canvas.flush();
     const auto& commands = canvas.text_commands();
-    std::vector<uint8_t> use_gdi(commands.size(), 0);
 
-    const auto visible_area = [](const TextCommand& command) {
-        if (command.clip.empty()) {
-            return command.rect;
+    bool rendered = false;
+    if (text_engine_.ready() && text_engine_.begin(dpi_)) {
+        for (const TextCommand& command : commands) {
+            text_engine_.draw(command);
         }
 
-        const float x = std::max(command.rect.x, command.clip.x);
-        const float y = std::max(command.rect.y, command.clip.y);
-        const float right = std::min(command.rect.right(), command.clip.right());
-        const float bottom = std::min(command.rect.bottom(), command.clip.bottom());
-        if (right <= x || bottom <= y) {
-            return RectF{};
-        }
-
-        return RectF{x, y, right - x, bottom - y};
-    };
-
-    for (size_t index = 0; index < commands.size(); ++index) {
-        use_gdi[index] = canvas.min_alpha(visible_area(commands[index])) >= 235 ? 1 : 0;
+        text_engine_.end();
+        rendered = true;
     }
 
-    for (size_t index = 0; index < commands.size(); ++index) {
-        if (use_gdi[index] == 0) {
-            const TextCommand& command = commands[index];
+    if (!rendered) {
+        // DWrite 初始化/绑定失败：退回 GDI+ 灰度 AA，宁可略软也不能没字。
+        for (const TextCommand& command : commands) {
             canvas.draw_text_immediate(command.text, command.rect, command.style, command.color, command.clip);
-        }
-    }
-
-    canvas.flush();
-    for (size_t index = 0; index < commands.size(); ++index) {
-        if (use_gdi[index] != 0) {
-            gdi_text_.draw(frame_->memory_dc(), commands[index], dpi_);
-            // GDI 文字在 DIB 上留下 alpha=0 的字形像素；这块背景本来就是不透明的，
-            // 直接置 255，Mica 模式才不会把文字当成透明洞透出材质。
-            canvas.make_opaque(visible_area(commands[index]));
         }
     }
 

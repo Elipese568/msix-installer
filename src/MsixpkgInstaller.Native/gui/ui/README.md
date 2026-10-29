@@ -69,7 +69,7 @@ Solid 回退（透明效果不可用时也长这样）：
 
 文字清晰度对比（3× 最近邻放大，同一块「示例包」卡片）：
 
-| 修正前：GDI+ 灰度 AA | 修正后：不透明表面 GDI ClearType |
+| 修正前：GDI+ 灰度 AA | 修正后：DirectWrite 灰度 AA |
 |---|---|
 | ![before](../../../../docs/images/self-drawn-ui/text-before.png) | ![after](../../../../docs/images/self-drawn-ui/text-after.png) |
 
@@ -90,7 +90,7 @@ Host ── Frame(32bppPABGR DIB) ── Presenter
 | 文件 | 职责 |
 |---|---|
 | `canvas.*` | GDI+ 绘制动词、`Frame` DIB、字体/格式缓存、测量、裁剪 |
-| `gdi_text.*` | GDI ClearType 文字回放（不透明表面）与字体缓存 |
+| `dwrite_text.*` | DirectWrite 灰度 AA 文字后端（唯一的绘制 + 度量来源） |
 | `text_layout.*` | 换行算法（CJK 逐字、拉丁按词、超长词硬拆、`\n`/`\r\n`） |
 | `theme.*` | Light/Dark/HC token、系统强调色、表面颜色 |
 | `widget.*` | `Widget` / `Panel` / 命中测试 / 焦点态 / 无障碍默认值 |
@@ -118,19 +118,17 @@ Host ── Frame(32bppPABGR DIB) ── Presenter
 - **MSAA**：根对象 + 可见 Widget + Table 行；`get_accName/Role/State/Value/
   DefaultAction/accLocation/accHitTest/accSelect/accNavigate/get_accFocus/
   get_accSelection/accDoDefaultAction`。事件：焦点、状态变化、值变化、表格选择。
-- **主题**：Light/Dark/HighContrast；强调色读 `HKCU\...\DWM\AccentColor`；卡片/控件
-  使用不透明表面，保证文字走 ClearType（材质透在页面背景、卡片间距与标题栏）。
+- **主题**：Light/Dark/HighContrast；强调色读 `HKCU\...\DWM\AccentColor`；材质可见时
+  卡片/控件是半透明表面，材质从底下透出。
 - **DPI**：`WM_DPICHANGED` 更新 dpi、重建 Frame、按建议矩形重排；布局只存 DIP。
 - **文字渲染（2026-10-29 修正）**：
-  - GDI+ 的 ClearType 在预乘 alpha 位图上会出彩边/重影（实测），所以文字分两路：
-    背景不透明（卡片/控件/表格/TextView）用 `GdiTextRenderer`（GDI `DrawTextW` +
-    `CLEARTYPE_QUALITY`）写进帧；背景透明（直接贴 Mica/Acrylic）用 GDI+ 灰度 AA
-    并写入正确的像素 alpha。
-  - GDI `DrawTextW` 写 32bpp DIB 时会把字形像素的 alpha 留成 0；Mica 模式下 DWM
-    会把它当透明洞，文字变成「鬼影」。回放后对被画区域强制 alpha=255（该区域
-    本来就在不透明卡片上，不会产生可见色块）。
-  - 半透明表面只能用灰度 AA —— 这是 Win32/DWM 的限制，不是参数问题。需要所有
-    文字都 ClearType 时，把文字放进不透明卡片。
+  - 文字统一由 DirectWrite 灰度 AA 绘制（`dwrite_text.*`），透明/半透明表面也能写
+    正确的预乘 alpha，不需要 ClearType 的 alpha 补丁。
+  - 测量与绘制共用同一套 `IDWriteTextLayout`：标题、正文、按钮、表格的基线与缩放
+    一致，不会再出现「透明标题和卡片正文差半个像素」。
+  - 之前试过 GDI ClearType + GDI+ 灰度双后端：透明标题与卡片正文来自两套排版，
+    位置和字形不一致，已移除。
+  - GDI+ 文字只保留为 DWrite 初始化失败时的兜底（`Canvas::draw_text_immediate`）。
 
 ## 验证记录（本机 Windows 11 26H2 / Build 26300，96 DPI）
 
@@ -141,9 +139,9 @@ Host ── Frame(32bppPABGR DIB) ── Presenter
   默认按钮启动模拟安装，进度/阶段文案/禁用态正常（见进度截图）。
 - 材质：Mica（浅/深）、Acrylic（深）、Solid（浅/高对比度）均能上屏；
   `MSIXPKG_UI_PRESENTER=layered` 可用（窗口自动切无边框）。
-- 高对比度下自动 Solid、禁用材质、卡片不透明、进度条边框可见。
-- 文字：不透明表面 GDI ClearType（与标准 Win32 控件一致的子像素渲染）；
-  透明表面 GDI+ 灰度 AA。放大对比见上面的 `text-before/after`。
+- 高对比度下自动 Solid、禁用材质、进度条边框可见。
+- 文字：DirectWrite 灰度 AA 单一后端；透明标题与卡片正文的基线/字形一致。
+  放大对比见上面的 `text-before/after`（旧 GDI+ 灰度 → 新 DirectWrite 灰度）。
 
 ## 已知限制
 
@@ -162,15 +160,15 @@ Host ── Frame(32bppPABGR DIB) ── Presenter
 6. Table 列宽固定；无排序、列宽拖动、双击。
 7. Layered 模式没有系统 caption/shadow，顶部 40dp 用于拖动；它是 Win10 的
    备选路径，不是默认。
-8. **直接贴在 Mica/Acrylic 上的文字是灰度 AA**（标题/副标题/角标）。Windows 自身
-   在透明表面上也无法使用 ClearType（子像素抗锯齿需要已知的不透明背景），这是
-   平台限制；正文都放在不透明表面上以换取 ClearType。
+8. **全框架使用灰度 AA，不追求 ClearType**：这是为「透明材质 + 单一文字后端 +
+   位置一致」做的取舍。一定要 ClearType 就得回到不透明表面 + 第二套后端，代价
+   正是之前那种标题/正文位置和字形不一致。
 
 ## 接入安装器（下一步）
 
 1. 把 `MSIXPKG_UI_SOURCES` 里的 10 个文件加进 `gui/gui.cmake`，或从 Native 的
-   `CMakeLists.txt` `add_subdirectory(gui/ui)`；链接 `gdiplus dwmapi oleacc
-   oleaut32 ole32 advapi32`。
+   `CMakeLists.txt` `add_subdirectory(gui/ui)`；链接 `gdiplus d2d1 dwrite dwmapi
+   oleacc oleaut32 ole32 advapi32`。
 2. 按设计文档 §5.1 写 `make_widget(const ControlSpec&)`：`STATIC`→Label、
    `BS_AUTOCHECKBOX`→Checkbox、`BUTTON`→Button、`ES_READONLY`→TextView、
    `PROGRESS_CLASSW`→ProgressBar、`WC_LISTVIEWW`→Table。
@@ -194,8 +192,9 @@ Table 和细节都塞进一屏。
   否则 MSAA 永远走到 `DefWindowProc` 的默认对象（`childCount=0`）。
 - **`UpdateLayeredWindow` 的 `psize` 是整窗尺寸**，不是客户区。分层窗口必须去掉
   caption 并按“客户区 == 整窗”设置，否则窗口会被 ULW 重设尺寸、布局被裁。
-- GDI+ 在预乘 alpha 表面上用灰度 AA（`TextRenderingHintAntiAliasGridFit`）；
-  不要开 ClearType，透明边缘会出彩边。真 ClearType 走 `gdi_text.*`。
-- GDI `DrawTextW` 在 32bpp DIB 上把字形 alpha 写成 0：Mica 模式下必须把文字区域
-  的 alpha 补成 255，否则文字在材质上只剩「鬼影」。
+- **文字统一走 DirectWrite**：GDI+ 只画形状，画完后 `Graphics::Flush(Sync)`，再让
+  `ID2D1DCRenderTarget` 绑定帧的 DIB 做 `BeginDraw/DrawTextLayout/EndDraw`。测量与
+  绘制必须使用同一套 `IDWriteTextLayout`，否则换行位置和基线会对不上。
+- GDI+ 的 ClearType 在预乘 alpha 位图上会出彩边/重影；GDI `DrawTextW` 写 32bpp
+  DIB 时又会把字形 alpha 留成 0。这两条老路都试过并移除了。
 - 只有 `SourceCopy` 能把 alpha 写进重定向位图；`AlphaBlend` 会保留目标 alpha。

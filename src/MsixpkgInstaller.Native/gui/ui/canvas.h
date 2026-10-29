@@ -95,8 +95,8 @@ struct SizeF {
     float height = 0.0f;
 };
 
-/// 一条待回放的文字。绘制阶段只记录，整棵树画完后由 Host 决定：
-/// 不透明表面用 GDI ClearType 写进帧（清晰），透明表面用 GDI+ 灰度 AA。
+/// 一条待回放的文字。Widget 绘制阶段只记录，整棵树画完后由 DirectWrite 以
+/// 灰度 AA 统一绘制（透明/不透明表面都能写正确的 alpha）；裁剪矩形随命令带走。
 struct TextCommand {
     std::wstring text;
     RectF rect;
@@ -105,10 +105,18 @@ struct TextCommand {
     RectF clip;
 };
 
+class TextMetrics {
+public:
+    virtual ~TextMetrics() = default;
+    /// 单行宽度（DIP）。换行文本由上层按 token 累加。
+    virtual float measure_width(std::wstring_view text, const TextStyle& style, float dpi) = 0;
+    /// 一行的高度（DIP，含行距）。
+    virtual float line_height(const TextStyle& style, float dpi) = 0;
+};
+
 class Canvas {
 public:
-    Canvas(Gdiplus::Bitmap& bitmap, float dpi, uint8_t* pixels, int stride_bytes, int width_px,
-           int height_px);
+    Canvas(Gdiplus::Bitmap& bitmap, float dpi, int width_px, int height_px);
     ~Canvas();
 
     Canvas(const Canvas&) = delete;
@@ -116,6 +124,8 @@ public:
 
     void set_dpi(float dpi);
     float dpi() const { return dpi_; }
+    /// 文字度量后端。没设时退回 GDI+ 度量（DWrite 初始化失败时用）。
+    void set_text_metrics(TextMetrics* metrics) { metrics_ = metrics; }
 
     void fill_rect(const RectF& rect, const Color& color);
     void fill_round_rect(const RectF& rect, float radius, const Color& color);
@@ -141,15 +151,9 @@ public:
     bool defer_text() const { return defer_text_; }
     const std::vector<TextCommand>& text_commands() const { return text_commands_; }
     void clear_text_commands() { text_commands_.clear(); }
-    /// 直接把文字用 GDI+ 画进帧（透明表面 / 分层回退用）。
+    /// 直接把文字用 GDI+ 画进帧（DWrite 失败时的兜底 / 分层回退用）。
     void draw_text_immediate(std::wstring_view text, const RectF& rect, const TextStyle& style, const Color& color,
                              const RectF& clip = {});
-    /// 文字矩形下方的最小 alpha（0-255）；用于决定能否用 ClearType。
-    uint8_t min_alpha(const RectF& dip_rect) const;
-    /// 把一块区域强制成不透明。GDI 的 DrawTextW 在 32bpp DIB 上会把字形像素的
-    /// alpha 写成 0；在 Mica/Acrylic 模式下 DWM 会当真，文字就变「鬼影」。
-    /// 这块区域本来就落在不透明卡片上，所以置 255 不会产生可见色块。
-    void make_opaque(const RectF& dip_rect);
     void flush();
 
 private:
@@ -162,8 +166,7 @@ private:
 
     std::unique_ptr<Gdiplus::Graphics> graphics_;
     float dpi_ = 96.0f;
-    uint8_t* pixels_ = nullptr;
-    int stride_bytes_ = 0;
+    TextMetrics* metrics_ = nullptr;
     int width_px_ = 0;
     int height_px_ = 0;
     bool defer_text_ = false;

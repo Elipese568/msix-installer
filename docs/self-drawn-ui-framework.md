@@ -275,6 +275,12 @@ screen.DrawImage(frame.bitmap(), 0, 0);
 1. **文字继续用 GDI `DrawTextW`（ClearType）**，GDI+ 只画形状/图片。仍是全自绘控件，只是文字后端用 GDI；需要 `Graphics::Flush(FlushIntentionSync)` 后再调用 GDI，避免 GDI+ 批处理顺序问题。
 2. 换 D2D/DirectWrite（灰度 AA，质量更稳但仍有取舍）。
 
+> **实现记录（2026-10-29）**：最终采用方案 2 —— 全框架文字统一由 DirectWrite 灰度
+> AA 绘制，GDI+ 只画形状并作为 DWrite 初始化失败时的兜底。原因：透明 Mica 表面需要
+> 真实的逐像素 alpha；GDI ClearType 在预乘 alpha 位图上会出鬼影，而 GDI/GDI+ 双后端
+> 会让透明标题与卡片正文的基线和字形不一致。实现与截图见
+> `src/MsixpkgInstaller.Native/gui/ui/README.md`。
+
 不要同时上 GDI+ 和 D2D 两套文字栈。
 
 ### 3.4 DPI、裁剪、脏矩形
