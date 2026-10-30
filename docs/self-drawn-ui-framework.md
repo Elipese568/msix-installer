@@ -1,6 +1,6 @@
 # 全自绘 GDI+ 安装器 UI 框架设计
 
-> **实现状态（2026-10-29，`feature/self-drawn-ui`）**：Wren 版向导已经落地并成为默认前端
+> **实现状态（2026-10-29 落地，2026-10-30 合入 `master`）**：Wren 版向导已经落地并成为默认前端
 > （`gui/gui_wizard_wren.cpp` + `gui/gui_widgets.cpp`）；五页、单实例、拖放、`WM_COPYDATA`、
 > 提权前台/闪屏、安装/卸载结果页都已接好，`-DMSIXPKG_GUI_LEGACY=ON` 保留老 Win32 标准控件版
 > 作为逐页回退。下面的设计稿保留当初的论证，但与实现不同的地方以此注为准：
@@ -28,7 +28,7 @@
 > `--ui-report` 的 `appearance=` / `material=` 与真实屏幕为准。
 
 > 状态：设计稿（2026-10-28）；框架核心 + demo 已实现
-> （`feature/self-drawn-ui`，2026-10-29，代码与验证记录见
+> （2026-10-29，代码与验证记录见
 > [`src/MsixpkgInstaller.Native/gui/ui/README.md`](../src/MsixpkgInstaller.Native/gui/ui/README.md)）
 > 框架已抽为独立仓库 **Wren**，以上路径通过 submodule 接入；命名空间由 `msixpkg::ui` 改为 `wren`。
 > 范围：`src/MsixpkgInstaller.Native/gui`
