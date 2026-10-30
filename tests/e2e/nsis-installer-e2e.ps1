@@ -305,15 +305,19 @@ if ($elevated) {
 Write-Host ''
 Write-Host 'negative: destination that cannot be created'
 
-# A reserved device name (NUL) can never be created as a directory, regardless of
-# whether the shell is elevated. Do not use "a file where a directory should be":
-# NSIS's /D= parser rejects that path before the setup sees it and silently falls back
-# to the default directory, which is writable on an elevated CI runner.
-New-Item -ItemType Directory -Force -Path $blockedParent | Out-Null
-$blockedTarget = Join-Path $blockedParent 'NUL\app'
-$blocked = Invoke-Setup @('/S', '/CURRENTUSER', '/NODESKTOP', "/D=$blockedTarget")
-Check ($blocked.ExitCode -eq 4) ('install into an impossible directory exits 4 (got ' + $blocked.ExitCode + ')')
-Check-Contains $blocked.Log 'FAILED to write the program files' 'log says the program files could not be written'
+# A reserved device name (NUL) is accepted by /D= but CreateDirectory fails for a
+# normal user. Elevated shells are skipped: NSIS may accept the device path and the
+# setup's fallback default is writable, so a portable "impossible" path would need ACL
+# manipulation this suite does not assume.
+if ($elevated) {
+    Skip 'impossible destination case (this shell is already elevated)'
+} else {
+    New-Item -ItemType Directory -Force -Path $blockedParent | Out-Null
+    $blockedTarget = Join-Path $blockedParent 'NUL\app'
+    $blocked = Invoke-Setup @('/S', '/CURRENTUSER', '/NODESKTOP', "/D=$blockedTarget")
+    Check ($blocked.ExitCode -eq 4) ('install into an impossible directory exits 4 (got ' + $blocked.ExitCode + ')')
+    Check-Contains $blocked.Log 'FAILED to write the program files' 'log says the program files could not be written'
+}
 
 # ---------------------------------------------------------------------------
 # 7) registry effects
