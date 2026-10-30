@@ -305,12 +305,12 @@ if ($elevated) {
 Write-Host ''
 Write-Host 'negative: destination that cannot be created'
 
-# A file where a directory should be: SetOutPath/File fail no matter who runs the setup,
-# so this case is meaningful on any machine. The installer must report failure.
+# A reserved device name (NUL) can never be created as a directory, regardless of
+# whether the shell is elevated. Do not use "a file where a directory should be":
+# NSIS's /D= parser rejects that path before the setup sees it and silently falls back
+# to the default directory, which is writable on an elevated CI runner.
 New-Item -ItemType Directory -Force -Path $blockedParent | Out-Null
-$blocker = Join-Path $blockedParent 'blocker.txt'
-Set-Content -Path $blocker -Value 'x' -Encoding ASCII
-$blockedTarget = Join-Path $blocker 'app'
+$blockedTarget = Join-Path $blockedParent 'NUL\app'
 $blocked = Invoke-Setup @('/S', '/CURRENTUSER', '/NODESKTOP', "/D=$blockedTarget")
 Check ($blocked.ExitCode -eq 4) ('install into an impossible directory exits 4 (got ' + $blocked.ExitCode + ')')
 Check-Contains $blocked.Log 'FAILED to write the program files' 'log says the program files could not be written'
