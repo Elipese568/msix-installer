@@ -25,7 +25,7 @@
 namespace msixpkg {
 
 /// 原生安装器版本（用于容器清单的 `installerMinVersion` 门禁与 ARP 展示）。
-inline constexpr char kInstallerVersion[] = "0.2.1";
+inline constexpr char kInstallerVersion[] = "0.3.0";
 
 struct InstallOptions {
     std::filesystem::path container;

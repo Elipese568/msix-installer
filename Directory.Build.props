@@ -6,7 +6,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Company>MsixpkgInstaller</Company>
     <Product>Msixpkg Installer</Product>
-    <Version>0.1.0</Version>
+    <Version>0.3.0</Version>
     <Copyright>Copyright (c) MsixpkgInstaller contributors</Copyright>
     <DebugType>portable</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
