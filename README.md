@@ -27,11 +27,11 @@
 | M5 | 卸载引用计数 + `list/verify/repair/clean` + ARP 卸载入口 | ✅ 完成 |
 | M6 | GUI 向导（五页、DPI/深色/本地化/无障碍）：**Wren 自绘**，`-DMSIXPKG_GUI_LEGACY=ON` 可回退 Win32 标准控件版 | ✅ 完成 |
 | M7 | E2E（负例套件 + 完整闭环 + Windows Sandbox）+ CI + 文档定稿 | ✅ 完成 |
-| 分发 | NSIS 安装包：把向导与 CLI 装到用户机器上（快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口） | ✅ 完成（E2E 46 项 + PATH 逻辑 13 个 NSIS 用例；本机受限环境里跳过的注册表断言由 CI 覆盖，见 [`installer/nsis/README.md`](installer/nsis/README.md)） |
+| 分发 | 自研原生 setup：把向导与 CLI 装到用户机器上（快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口、自提权、独立卸载器） | ✅ 完成（E2E 45 项 + GUI 烟测 90 项；内嵌载荷不依赖 `%TEMP%`，见 [`installer/setup/README.md`](installer/setup/README.md)） |
 
-| NuGet | `Msixpkg.Build`：构建期自动产出 `.msixpkg` 的 MSBuild 任务包（MIT；包内 `tasks\` 带 `Msixpkg.Core.dll`） | ✅ 完成并**已发布 `0.1.0`**（<https://www.nuget.org/packages/Msixpkg.Build/0.1.0>）；包验收 25 项：布局 + `PackageReference` 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致；发布走 nuget.org Trusted Publishing/OIDC，见 [`docs/nuget-package.md`](docs/nuget-package.md) |
+| NuGet | `Msixpkg.Build`：构建期自动产出 `.msixpkg` 的 MSBuild 任务包（MIT；包内 `tasks\` 带 `Msixpkg.Core.dll`） | ✅ 完成并**已发布 `0.3.0`**（<https://www.nuget.org/packages/Msixpkg.Build/0.3.0>）；包验收 25 项：布局 + `PackageReference` 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致；发布走 nuget.org Trusted Publishing/OIDC，见 [`docs/nuget-package.md`](docs/nuget-package.md) |
 
-原生侧测试 **63 条**、托管侧 **132 条**，Debug 与 Release 双配置均绿，Release 开 `/WX`（零警告）；
+原生侧测试 **72 条**、托管侧 **132 条**，Debug 与 Release 双配置均绿，Release 开 `/WX`（零警告）；
 负例 E2E 33 项检查全过（`tests/e2e/msixpkg-negative.ps1`，不需要管理员）。
 
 **安装器 GUI 已迁到 Wren**（单 HWND、retained Widget 树、D2D/DComp + Mica、MSAA）：
@@ -104,40 +104,42 @@ msixpkg-native cert-remove --thumbprint-sha1 <sha1>
 
 ## 分发：用安装包安装这个安装器
 
-用户机器上不该要求他们先找到 exe。用一个 NSIS 包把向导与 CLI 装好并配好入口：
-
-> **安装这个安装包时请「以管理员身份运行」**（右键 →「以管理员身份运行」）。
-> 安装包自身是 `asInvoker`，不会自己弹 UAC；不提权只会装成当前用户级，带主动防御的机器上
-> 文件关联 / PATH / ARP 还可能写不进去。
+用户机器上不该要求他们先找到 exe。用一个**自研原生 setup** 把向导与 CLI 装好并配好入口
+（旧 NSIS 管线已经整体删除）：
 
 ```powershell
-# 构建（自动准备 NSIS 工具链；产物 artifacts\setup\MsixpkgInstaller-<版本>-setup.exe）
-powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1
+# 构建（CMake 产物 + 自附加载荷；不需要 NSIS 工具链，也不联网）
+powershell -ExecutionPolicy Bypass -File scripts\build-setup.ps1
 
 # 验收（不需要管理员；真的装一次、卸一次）
-powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
+powershell -ExecutionPolicy Bypass -File tests\e2e\setup-installer-e2e.ps1
+
+# 页面/无障碍烟测（合成数据，不安装）
+powershell -ExecutionPolicy Bypass -File tests\e2e\setup-gui-smoke.ps1
 ```
 
 装完的东西：向导 + CLI、开始菜单与（可选）桌面快捷方式、`.msixpkg` 文件关联（双击 =
-用向导打开并停在摘要页）、（可选）PATH 条目、「设置 → 应用」里的卸载入口。
-三个产物：
+用向导打开并停在摘要页）、（可选）PATH 条目、「设置 → 应用」里的卸载入口。三个产物：
 
 | 产物 | 用途 |
 |---|---|
-| `MsixpkgInstaller-<版本>-setup.exe` | 真安装：向导 + CLI、开始菜单与（可选）桌面快捷方式、`.msixpkg` 关联（双击 = 用向导打开并停在摘要页）、（可选）PATH 条目、「设置 → 应用」卸载入口 |
-| `run-setup-with-local-temp.cmd` | 免提权启动器：先把 `TEMP`/`TMP` 指到可写位置再启动 setup，专治上面那句 `Error writing temporary file`（带主动防御/未签名被拦的机器上程序文件能装上；注册表那几项若仍被拒，会如实写进 `setup.log`） |
-| `MsixpkgInstaller-<版本>-portable.zip` | 解压即用：容器 / Windows Sandbox / 被安全软件拦住的机器（那里未签名的 exe 连 `%TEMP%` 都写不了，双击 setup 只会弹 `Error writing temporary file`；详见 [`installer/nsis/README.md`](installer/nsis/README.md) §7）。代价是没有快捷方式/关联/PATH/ARP |
+| `MsixpkgInstaller-<版本>-setup.exe` | 真安装：向导 + CLI + `Uninstall.exe`、开始菜单与（可选）桌面快捷方式、`.msixpkg` 关联（双击 = 用向导打开并停在摘要页）、（可选）PATH 条目、「设置 → 应用」卸载入口 |
+| `MsixpkgInstaller-<版本>-portable.zip` | 解压即用：容器 / Windows Sandbox / 被安全软件拦住的机器。不写注册表、不要临时目录；代价是没有快捷方式/关联/PATH/ARP |
+| `MsixpkgInstaller-<版本>-dist.zip` | setup + `.sha256` + 渲染后的中文 `README.md`（`scripts\pack-installer-zip.ps1`） |
 
-`scripts\pack-installer-zip.ps1` 另出一个**面向最终用户的**分发 zip：setup exe + 它的 `.sha256`
-和渲染后的中文 `README.md`（含「以管理员身份运行」、静默安装、使用与卸载指引），产物是
-`artifacts\setup\MsixpkgInstaller-<版本>-dist.zip`。
+和旧 NSIS 包相比，安装包**不再需要可写的 `%TEMP%`**：向导、CLI 与卸载器都从 setup exe
+自身的追加载荷读取（`[exe][payload][index][footer]`），所以被主动防御拦住临时文件的机器也能
+双击；失败会如实写进日志，而不是在脚本跑之前弹一句 `NSIS Error`。选「为所有用户安装」时
+setup 会用 `runas` 自己请求 UAC，不再要求右键「以管理员身份运行」。
 
-静默安装支持 `/S /ALLUSERS|/CURRENTUSER /NOASSOC /NOPATH /NODESKTOP /D=<目录>`，
+静默安装支持 `/S /D=<目录> /ALLUSERS|/CURRENTUSER /NOASSOC /NOPATH /DESKTOP /NODESKTOP`，
 退出码 `0/4/5/6/7`。它**不**安装任何应用、**不**碰证书存储、**不**删 `%ProgramData%\Msixpkg`
 下的安装记录（那是回收发布者证书的依据）。
 
-细节、开关、12 条实测踩过的坑、以及「`%TEMP%` 被安全软件拦住 / 免提权怎么装」见
-[`installer/nsis/README.md`](installer/nsis/README.md)。
+设计、载荷格式、日志与排错见 [`installer/setup/README.md`](installer/setup/README.md)。
+发版时上面三个产物挂在 GitHub Release 上（`setup.exe` 的 `.sha256` 与渲染后的中文
+`README.md` 由 `scripts\pack-installer-zip.ps1` 打进 `dist.zip`）；同一个 tag 也会触发
+`nuget-publish.yml` 发 `Msixpkg.Build`。
 
 ## 打包工具：用 NuGet 包接入（开发机 / CI）
 
@@ -145,7 +147,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Msixpkg.Build" Version="0.1.0" />
+  <PackageReference Include="Msixpkg.Build" Version="0.3.0" />
 </ItemGroup>
 
 <PropertyGroup>
@@ -164,7 +166,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 
 仓库里**只有这一个 NuGet 包**：`Msixpkg.Core` 作为二进制附属随包内的 `tasks\netstandard2.0\` 走
 （刻意不声明成包依赖 —— 任务 DLL 由宿主 MSBuild 在自己的 load context 里加载，依赖必须与它同目录）；
-`Msixpkg.Packer`（CLI）是开发机 / CI 的构建期工具，原生安装器走 NSIS 分发，两者都不上 NuGet。
+`Msixpkg.Packer`（CLI）是开发机 / CI 的构建期工具，原生安装器走自研 setup 分发，两者都不上 NuGet。
 
 本地打包与验收（验收只在本机跑，不占 CI）：
 
@@ -174,10 +176,10 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1   # 25 
 ```
 
 发布由 CI 负责（[`.github/workflows/nuget-publish.yml`](.github/workflows/nuget-publish.yml)）：
-`git tag v0.2.1 && git push origin v0.2.1`，或在 Actions 里手动 Run workflow 填版本号。
+`git tag v0.3.0 && git push origin v0.3.0`，或在 Actions 里手动 Run workflow 填版本号。
 用 nuget.org 的 **Trusted Publishing（OIDC）**，仓库里不存长期密钥（信任策略与 `NUGET_USER`
-Secret 都已配好）。**已发布：`Msixpkg.Build 0.1.0`** ——
-<https://www.nuget.org/packages/Msixpkg.Build/0.1.0>。
+Secret 都已配好）。**已发布：`Msixpkg.Build 0.3.0`** ——
+<https://www.nuget.org/packages/Msixpkg.Build/0.3.0>。
 
 细节（包布局、可复现构建、发布准备、排错）见
 [`docs/nuget-package.md`](docs/nuget-package.md)。
@@ -196,21 +198,21 @@ src/
     cli/                   命令行前端：install / uninstall / list / verify / repair / clean
     gui/                   Wren 自绘向导（五页；`gui/ui` 是 Wren submodule）+ res/ 字符串表与图标
                            `-DMSIXPKG_GUI_LEGACY=ON` 回退老 Win32 标准控件版
+    setup/                 Wren 自绘分发安装器：参数/日志/注册表/PATH/快捷方式/ARP/载荷/卸载器
     src/                   容器读、校验器、certstore、deployment(C++/WinRT)、state、log、
                            installer 编排、ops、arp
-    tests/                 自写极简测试框架 + 63 条原生测试
+    tests/                 自写极简测试框架 + 72 条原生测试（含 setup 的 PATH/参数/载荷用例）
 tests/
   Msixpkg.Core.Tests/      xunit v3 单元测试（132 条）
   vectors/                 两端共享的夹具（黄金容器、测试证书、合成 .msix、真实 p7x、
                            三个单缺陷负例向量）
   e2e/                     负例套件 + 完整安装闭环 + Windows Sandbox 配置
-                           + NSIS 分发安装包的安装/卸载套件（nsis-installer-e2e.ps1）
+                           + setup 分发安装包的安装/卸载套件（setup-installer-e2e.ps1）
+                           + setup 页面/无障碍烟测（setup-gui-smoke.ps1）
                            + NuGet 包验收（nuget-package-e2e.ps1）
-  nsis/                    PATH 逻辑的 NSIS 层单元测试（path-logic.nsi，13 个用例）
 installer/
-  nsis/                    分发安装包：MsixpkgInstaller.nsi + msixpkg-path.nsh + README
-                           （构建脚本另出免提权启动器与便携 zip）
-scripts/                   生成与构建脚本（部署错误码表、NSIS 安装包、NuGet 包）
+  setup/                   分发安装包：README + 面向最终用户的 README-dist
+scripts/                   生成与构建脚本（部署错误码表、setup 打包、NuGet 包）
 docs/
   msixpkg-format-v1.md     格式规范（规范性来源：条目白名单、摘要算法、30 步校验顺序、错误码）
   integration-winui3.md    真实 Packaged WinUI 3 工程的接入步骤与实测故障排查
@@ -249,7 +251,7 @@ tests\Msixpkg.Core.Tests\bin\Debug\net10.0\Msixpkg.Core.Tests.exe
 cd src\MsixpkgInstaller.Native
 cmake --preset windows-x64 -S .
 cmake --build --preset windows-x64-debug
-build\x64\Debug\msixpkg_native_tests.exe          # 期望：总计 63 成功 63
+build\x64\Debug\msixpkg_native_tests.exe          # 期望：总计 72 成功 72
 cmake --build --preset windows-x64-release        # Release 开 /WX，必须零警告
 build\x64\Release\msixpkg_native_tests.exe
 
@@ -262,11 +264,12 @@ powershell -ExecutionPolicy Bypass -File scripts\pack-nuget.ps1
 powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
 
 # 分发安装包：构建 + 安装/卸载验收（都不需要管理员）
-powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1
-powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
+powershell -ExecutionPolicy Bypass -File scripts\build-setup.ps1
+powershell -ExecutionPolicy Bypass -File tests\e2e\setup-installer-e2e.ps1
+powershell -ExecutionPolicy Bypass -File tests\e2e\setup-gui-smoke.ps1
 ```
 
-CI 见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：托管 + 原生 + 负例 E2E + NSIS 分发安装包四段；
+CI 见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：托管 + 原生 + 负例 E2E + setup 分发安装包四段；
 NuGet 包的构建与发布单独一条流水线（[`.github/workflows/nuget-publish.yml`](.github/workflows/nuget-publish.yml)），
 由 tag 或手动触发。
 真实安装/卸载闭环需要管理员与真实签名包，按 [`tests/e2e/README.md`](tests/e2e/README.md) 在专用机器或

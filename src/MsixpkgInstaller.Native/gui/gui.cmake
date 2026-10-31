@@ -33,10 +33,12 @@ else()
 
   # Wren 是 submodule（src/MsixpkgInstaller.Native/gui/ui）。作为子工程接入时
   # demo/单测默认关闭；/WX 跟随主工程，避免「框架干净、集成代码告警」的半套状态。
-  set(WREN_BUILD_DEMO OFF)
-  set(WREN_BUILD_TESTS OFF)
-  set(WREN_WARNINGS_AS_ERRORS ${MSIXPKG_WARNINGS_AS_ERRORS})
-  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/gui/ui" "${CMAKE_CURRENT_BINARY_DIR}/wren")
+  if(NOT TARGET Wren::wren)
+    set(WREN_BUILD_DEMO OFF)
+    set(WREN_BUILD_TESTS OFF)
+    set(WREN_WARNINGS_AS_ERRORS ${MSIXPKG_WARNINGS_AS_ERRORS})
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/gui/ui" "${CMAKE_CURRENT_BINARY_DIR}/wren")
+  endif()
 endif()
 
 add_executable(msixpkg_native_gui WIN32 ${MSIXPKG_GUI_SOURCES} res/msixpkg.rc)

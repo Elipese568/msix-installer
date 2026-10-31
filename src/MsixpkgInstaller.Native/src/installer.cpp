@@ -379,7 +379,7 @@ std::filesystem::path helper_executable_path(const std::filesystem::path& self, 
         return self;
     }
 
-    // 其余前端（GUI）必须用**同目录的 CLI**：NSIS 安装包把两个 exe 放在一起。
+    // 其余前端（GUI）必须用**同目录的 CLI**：分发包把两个 exe 放在一起。
     std::error_code status;
     const std::filesystem::path sibling = self.parent_path() / L"msixpkg-native.exe";
     if (std::filesystem::is_regular_file(sibling, status) && !status) {

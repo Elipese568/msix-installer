@@ -41,7 +41,7 @@
 | 产物 | 大小 |
 |---|---|
 | `msixpkg-installer.exe`（Release） | 817,664 B（约 0.8 MB） |
-| `MsixpkgInstaller-0.2.1-setup.exe` | 589,701 B（约 0.58 MB） |
+| `MsixpkgInstaller-0.3.0-setup.exe` | 589,701 B（约 0.58 MB） |
 | 便携包里的 `msixpkg-installer.exe` | 约 1.0 MB（旧版本产物） |
 
 用 `dumpbin /dependents` 看，当前 GUI **并不是严格的“零依赖”**：
@@ -146,7 +146,7 @@ Spike 环境：Windows 11 build 26300，x64，100% DPI；.NET Framework 4.8.1（
 
 ### 4.1 引擎互操作
 
-原生引擎（容器校验、证书存储、部署栈、状态库、回滚、策略）约 5,800 行 C++，有 63 条原生测试，并且和 C# 侧做过逐字节摘要对照。**不应该为了换 UI 把它重写成 C#**。
+原生引擎（容器校验、证书存储、部署栈、状态库、回滚、策略）约 5,800 行 C++，有 72 条原生测试，并且和 C# 侧做过逐字节摘要对照。**不应该为了换 UI 把它重写成 C#**。
 
 WPF UI 要驱动它，只有三种接法：
 
@@ -167,7 +167,7 @@ WPF UI 要驱动它，只有三种接法：
 - 拖放：`.msixpkg` 拖入 → 载入 → 跳同意页；
 - 提权：助手必须是同目录的 `msixpkg-native.exe`（`runas` + `SW_HIDE`）；GUI 自己当助手会三方互等死锁（handoff 坑 19）；
 - ARP：`UninstallString` 指向 GUI 的 `uninstall --family-name`；
-- 文件关联/快捷方式/便携包/NSIS 载荷；
+- 文件关联/快捷方式/便携包/setup 载荷；
 - 退出码 0–7 与 CLI 逐字一致；
 - 同意页安全门（未勾选禁用、未钉扎二次确认、`--all-users` 条件显示）；
 - UIA 名称、Tab 顺序、回车默认按钮、屏幕阅读器；
@@ -186,8 +186,8 @@ WPF UI 要驱动它，只有三种接法：
 ### 4.4 构建、CI 与分发
 
 - 现在是 CMake 一套工具链；加 WPF 就变成 CMake + .NET 双工具链。
-- CI 要装 .NET Framework 4.8 targeting pack（windows-latest 通常有）或 .NET 10 SDK；`dotnet build` 与 CMake 的产物要一起塞进 NSIS。
-- NSIS 的“文件是否真的写下去”检查、锁定文件检查、便携 zip、PATH/关联/ARP 都要跟着改。
+- CI 要装 .NET Framework 4.8 targeting pack（windows-latest 通常有）或 .NET 10 SDK；`dotnet build` 与 CMake 的产物要一起塞进 setup。
+- setup 的“文件是否真的写下去”检查、锁定文件检查、便携 zip、PATH/关联/ARP 都要跟着改。
 - 代码签名流程不变，但多签一个 exe/dll。
 
 ### 4.5 安全、无障碍、DPI
@@ -282,7 +282,7 @@ void msixpkg_free(...);
 | 0. Spike | net48 WPF 壳 + 5 页假数据 + 自定义 chrome + 深浅色 + UIA + DPI；P/Invoke 打通 `preview` | 能跑、能量体积/启动/UIA | 3–5 天 |
 | 1. 互操作 | C ABI 门面 + P/Invoke + 回调 + 错误映射 | `preview/install/uninstall/list` 与 CLI 行为一致 | 1–2 周 |
 | 2. UI | 5 页 + MVVM + 主题资源 + 自定义模板 + 图标 + 动画 | 设计稿验收 + 键盘/屏幕阅读器 | 2–3 周 |
-| 3. 打包 | NSIS 载荷、关联、ARP、便携包、签名、CI | 安装/卸载 E2E 46 项 + 负例 33 项 | 1 周 |
+| 3. 打包 | setup 载荷、关联、ARP、便携包、签名、CI | 安装/卸载 E2E 45 项 + 负例 33 项 | 1 周 |
 | 4. 回归 | 63 原生测试不变；UIA/DPI/深浅色/高对比；Win10 22H2 + Win11 干净 VM | 全绿 | 1 周 |
 
 总计约 **4–6 周**（不含视觉设计探索）。如果还要把 net10/Fluent 作为目标，再加 1–2 周打包/运行时工作，并接受 60 MB+。
@@ -291,7 +291,7 @@ void msixpkg_free(...);
 
 - 安装载荷总大小 ≤ 当前的 2 倍（不含 .NET Framework 本身）；单文件 UI ≤ 2 MB。
 - 参考机 warm 启动 ≤ 500 ms、工作集 ≤ 120 MB；干净 VM 首次启动 ≤ 2 s（记录基线，不作为硬门槛）。
-- 63 条原生测试、132 条托管测试、33 项负例 E2E、46 项 NSIS E2E 全绿。
+- 72 条原生测试、132 条托管测试、33 项负例 E2E、45 项 setup E2E 与 90 项 setup GUI 烟测全绿。
 - 150%/200% DPI、双屏混合 DPI、Light/Dark/High Contrast、zh-CN/en-US 全部人工过一遍。
 - UIA：五个页面的关键控件名称/角色/可用状态与现在一致；Tab 顺序完整；Narrator 能读完同意页。
 - 不提权也能完成“预览 + 同意 + 安装（用户级）”；提权助手仍是 CLI；退出码 0–7 不变。
@@ -303,7 +303,7 @@ void msixpkg_free(...);
 
 1. **.NET 10 自包含 WPF**：体积 60–140 MB，与安装器定位冲突；WPF 不支持 trimming/NativeAOT，压不下去。
 2. **.NET 10 框架依赖**：要求用户预装 Desktop Runtime 10；必须做 bootstrapper，失败面大。
-3. **完全用 C# 重写引擎**：证书存储、部署栈、回滚、钉扎、状态库都要重做；现有 63 条原生测试和跨语言逐字节校验的价值会归零。
+3. **完全用 C# 重写引擎**：证书存储、部署栈、回滚、钉扎、状态库都要重做；现有 72 条原生测试和跨语言逐字节校验的价值会归零。
 4. **在 Win32 窗口里嵌 WPF island**：airspace、DPI、焦点、UIA 混合问题会让它比现在更糟。
 5. **为了五页向导上 WinUI 3**：Windows App SDK 运行时/自包含体积、unpackaged 提权与生命周期问题，收益不匹配。
 

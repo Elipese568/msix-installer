@@ -8,7 +8,7 @@
     本仓库**只发布这一个包**。Msixpkg.Core 不再 IsPackable，它作为「二进制附属」
     随包内的 tasks\netstandard2.0\Msixpkg.Core.dll 一起分发 —— 任务 DLL 由 MSBuild
     在自己的 load context 里加载，依赖必须与它同目录才能解析。Msixpkg.Packer（CLI）
-    是开发机 / CI 的构建期工具，同样不上 NuGet（终端用户拿到的原生安装器走 installer/nsis）。
+    是开发机 / CI 的构建期工具，同样不上 NuGet（终端用户拿到的原生安装器走 installer/setup）。
 
     包内容（这就是对外契约，tests\e2e\nuget-package-e2e.ps1 会逐条断言）：
 

@@ -1,10 +1,12 @@
 # 端到端测试（`tests/e2e/`）
 
-三层验证，从「谁都能跑」到「需要管理员 + 真实签名包」：
+几层验证，从「谁都能跑」到「需要管理员 + 真实签名包」：
 
 | 脚本 | 需要什么 | 覆盖什么 |
 |---|---|---|
 | [`gui-smoke.ps1`](gui-smoke.ps1) | 已构建的 `msixpkg-installer.exe`（GUI） | Wren 向导五页 + 同意页安全门 + 进度时间线 + 结果页三种形态 + 主题/材质 + 帧统计；只用 `--ui-*` 合成数据，**不安装任何东西** |
+| [`setup-gui-smoke.ps1`](setup-gui-smoke.ps1) | 已构建的 `msixpkg-setup.exe` / `msixpkg-uninstall.exe` | setup 的选项/进度/完成页与卸载确认页：控件 ID、复选框默认值、主题/材质、帧统计；同样只喂合成数据 |
+| [`setup-installer-e2e.ps1`](setup-installer-e2e.ps1) | `scripts\build-setup.ps1` 的产物 | 真装一次 / 卸一次：静默 + `/D=`、载荷哈希、日志、幂等、组件开关、`/ALLUSERS` 未提权退 5、不可创建目标退 4、注册表效果（可写时）、安装记录不被删、便携包、**不可用的 `%TEMP%` 也能装**、GUI `/AUTO` 全流程 |
 | [`msixpkg-negative.ps1`](msixpkg-negative.ps1) | 已构建的原生 exe | 篡改 / 截断 / 未钉扎 / 三个单缺陷负例向量 / 用法错误 / **失败必须可读上报** / `repair` 不改动任何东西 / 未提权不许碰证书 |
 | [`nuget-package-e2e.ps1`](nuget-package-e2e.ps1) | .NET SDK（有 VS 更好） | `Msixpkg.Build` 包：包布局与元数据 / `PackageReference` 消费（空包缓存）/ 两个 MSBuild 宿主 / 产出与黄金样本**逐字节相同** / 条目一律 `store` |
 | [`msixpkg-e2e.ps1`](msixpkg-e2e.ps1) | **管理员** + 真实已签名 MSIX（含其 PFX） | 完整闭环：打包 → 安装 → 包已注册 + 证书已受信 + ARP 条目 → 启动应用 → 卸载 → 包与证书都消失 → 重复卸载幂等 → 状态库丢失时的兜底 |
@@ -26,6 +28,15 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\msixpkg-negative.ps1
 powershell -ExecutionPolicy Bypass -File tests\e2e\gui-smoke.ps1 `
     -GuiPath src\MsixpkgInstaller.Native\build\x64\Release\msixpkg-installer.exe
 # 期望：checks 81, failures 0（断言按 resource.h 的 IDC_* 取控件，不依赖界面语言）
+
+# 2c) 分发安装包：构建 + 真装/真卸（无需管理员）
+powershell -ExecutionPolicy Bypass -File scripts\build-setup.ps1
+powershell -ExecutionPolicy Bypass -File tests\e2e\setup-installer-e2e.ps1
+# 期望：checks 45, failures 0, skipped 2（受限环境跳过注册表断言）
+
+# 2d) setup 页面/无障碍烟测（只喂合成数据，不安装）
+powershell -ExecutionPolicy Bypass -File tests\e2e\setup-gui-smoke.ps1
+# 期望：checks 90, failures 0
 
 # 3) NuGet 包验收（无需管理员；会先打包，再用 PackageReference 样例构建并比对黄金样本）
 powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1

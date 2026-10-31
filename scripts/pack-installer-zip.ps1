@@ -7,13 +7,13 @@
     内容：
         MsixpkgInstaller-<版本>-setup.exe
         MsixpkgInstaller-<版本>-setup.exe.sha256
-        README.md                     ← 由 installer\nsis\README-dist.md 渲染
+        README.md                     ← 由 installer\setup\README-dist.md 渲染
 
     版本号从 src\MsixpkgInstaller.Native\res\msixpkg.rc 的 FILEVERSION 读取，
-    与 scripts\build-nsis-installer.ps1 共用同一个事实来源。
+    与 scripts\build-setup.ps1 共用同一个事实来源。
 
     README 模板里的 {{VERSION}} / {{SETUP_FILE}} / {{SHA256}} 会被实际值替换；
-    渲染后还会断言 README 里确实包含「以管理员身份运行」的安装说明 —— 这是这个
+    渲染后还会断言 README 里确实包含「管理员批准」的安装说明 —— 这是这个
     分发 zip 的硬性要求，缺了就失败，不要靠人工记得。
 
 .PARAMETER SetupPath
@@ -23,14 +23,14 @@
     输出目录，默认 artifacts\setup。
 
 .PARAMETER ReadmeTemplate
-    README 模板路径，默认 installer\nsis\README-dist.md。
+    README 模板路径，默认 installer\setup\README-dist.md。
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\pack-installer-zip.ps1
 
 .EXAMPLE
     # 指定另一个已构建的安装包
-    powershell -ExecutionPolicy Bypass -File scripts\pack-installer-zip.ps1 -SetupPath artifacts\setup\MsixpkgInstaller-0.2.1-setup.exe
+    powershell -ExecutionPolicy Bypass -File scripts\pack-installer-zip.ps1 -SetupPath artifacts\setup\MsixpkgInstaller-0.3.0-setup.exe
 #>
 [CmdletBinding()]
 param(
@@ -48,7 +48,7 @@ if (-not (Test-Path -LiteralPath $rcPath)) {
     throw "找不到版本来源：$rcPath"
 }
 
-# 版本号的单一事实来源（与 build-nsis-installer.ps1 相同）。
+# 版本号的单一事实来源（与 build-setup.ps1 相同）。
 $rcText = [IO.File]::ReadAllText($rcPath, (New-Object Text.UTF8Encoding($false)))
 if ($rcText -notmatch 'FILEVERSION\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)') {
     throw "在 $rcPath 里找不到 FILEVERSION x, y, z, w"
@@ -68,12 +68,12 @@ if (-not $SetupPath) {
 }
 $SetupPath = [IO.Path]::GetFullPath($SetupPath)
 if (-not (Test-Path -LiteralPath $SetupPath)) {
-    throw "找不到安装包：$SetupPath`n先构建：powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1"
+    throw "找不到安装包：$SetupPath`n先构建：powershell -ExecutionPolicy Bypass -File scripts\build-setup.ps1"
 }
 $setupName = [IO.Path]::GetFileName($SetupPath)
 
 if (-not $ReadmeTemplate) {
-    $ReadmeTemplate = Join-Path $repoRoot 'installer\nsis\README-dist.md'
+    $ReadmeTemplate = Join-Path $repoRoot 'installer\setup\README-dist.md'
 }
 if (-not (Test-Path -LiteralPath $ReadmeTemplate)) {
     throw "找不到 README 模板：$ReadmeTemplate"
@@ -103,8 +103,8 @@ $readme = $template.Replace('{{VERSION}}', $productVersion).Replace('{{SETUP_FIL
 if ($readme -match '\{\{[A-Z0-9_]+\}\}') {
     throw "README 模板里还有未替换的占位符：$($Matches[0])"
 }
-if ($readme -notmatch '以管理员身份运行') {
-    throw 'README 模板没有说明「以管理员身份运行」——这是分发 zip 的硬性要求。'
+if ($readme -notmatch '管理员批准') {
+    throw 'README 模板没有说明「为所有用户安装会请求管理员批准」——这是分发 zip 的硬性要求。'
 }
 
 # ---------------------------------------------------------------------------
@@ -167,8 +167,8 @@ finally {
     $archive.Dispose()
 }
 
-if ($readmeInZip -notmatch '以管理员身份运行') {
-    throw 'zip 里的 README.md 没有「以管理员身份运行」说明'
+if ($readmeInZip -notmatch '管理员批准') {
+    throw 'zip 里的 README.md 没有「管理员批准」说明'
 }
 if ($readmeInZip -notmatch [regex]::Escape($hash)) {
     throw 'zip 里的 README.md 没有写入安装包的实际 SHA-256'
@@ -181,7 +181,7 @@ $zipMb = [Math]::Round((Get-Item -LiteralPath $zipPath).Length / 1MB, 2)
 Write-Host ''
 Write-Host "分发 zip：$zipPath"
 Write-Host "      版本 $productVersion"
-Write-Host "      内容 $setupName + $setupName.sha256 + README.md（含「以管理员身份运行」说明）"
+Write-Host "      内容 $setupName + $setupName.sha256 + README.md（含 UAC 说明）"
 Write-Host "      大小 $zipMb MB"
 Write-Host "      SHA-256 $zipHash"
 Write-Host "      摘要文件 $zipPath.sha256"

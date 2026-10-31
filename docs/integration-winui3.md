@@ -83,7 +83,7 @@ Windows 的证书集合导入路径（`X509Certificate2Collection.Import`）对�
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Msixpkg.Build" Version="0.1.0" />
+  <PackageReference Include="Msixpkg.Build" Version="0.3.0" />
 </ItemGroup>
 ```
 

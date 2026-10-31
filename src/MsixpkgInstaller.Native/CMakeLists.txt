@@ -137,6 +137,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gui/gui.cmake")
   include("${CMAKE_CURRENT_SOURCE_DIR}/gui/gui.cmake")
 endif()
 
+# ---------- 分发安装器（setup / Uninstall.exe） ----------
+# 它只依赖 Windows 自带库与 Wren；与 msixpkg_core 的部署/证书代码隔离，
+# 因此「安装包的安装包」不会把 WinRT 拖进安装进程。
+option(MSIXPKG_BUILD_SETUP "Build the distribution setup and uninstaller" ON)
+if(MSIXPKG_BUILD_SETUP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/setup/setup.cmake")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/setup/setup.cmake")
+endif()
+
 # 用 VS 的调试器跑测试时能直接命中源码
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT msixpkg_native_tests)
 enable_testing()

@@ -4,7 +4,7 @@
     <OutputType>Exe</OutputType>
     <!--
       net10.0：CLI 是开发机 / CI 上的构建期工具（用 dotnet build 从源码产出后直接用），
-      不是给终端用户的产物 —— 终端用户拿到的原生安装器由 installer/nsis 分发，
+      不是给终端用户的产物 —— 终端用户拿到的原生安装器由 installer/setup 分发，
       因此这里不 PackAsTool、也不发布任何 NuGet 包。
     -->
     <TargetFramework>net10.0</TargetFramework>

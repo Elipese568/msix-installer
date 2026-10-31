@@ -2,9 +2,9 @@ name: ci
 
 # 四段互相独立的验证：
 #   managed       —— 托管库 + 打包器 + 132 条 xunit v3 测试（注意：不是 dotnet test）
-#   native        —— C++ 原生核心/安装器（Release + /WX）+ 58 条原生测试
+#   native        —— C++ 原生核心/安装器（Release + /WX）+ 72 条原生测试
 #   e2e           —— 容器校验、计划、失败上报的负例套件（不需要管理员，也不需要真实安装）
-#   nsis-package  —— 分发安装包：构建 setup.exe，并真的装一次 / 卸一次
+#   setup-package —— 分发安装包：构建内嵌载荷的 setup.exe，并真的装一次 / 卸一次
 #
 # NuGet 包 Msixpkg.Build 的「构建 + 发布」在 .github/workflows/nuget-publish.yml；
 # 它的验收（包布局 / PackageReference 消费 / 两个 MSBuild 宿主 / 与黄金样本逐字节比对）是
@@ -88,6 +88,14 @@ jobs:
           -File tests\e2e\gui-smoke.ps1
           -GuiPath build\ci-native\Release\msixpkg-installer.exe
 
+      - name: setup GUI smoke (Wren setup/uninstaller pages)
+        # setup 与 Uninstall.exe 的页面/控件 ID/主题也是发布物的一部分。
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass
+          -File tests\e2e\setup-gui-smoke.ps1
+          -SetupPath build\ci-native\Release\msixpkg-setup.exe
+          -UninstallPath build\ci-native\Release\msixpkg-uninstall.exe
+
       - name: cross-language check (native validator on the C#-produced golden container)
         # 这条断言的是「两端对同一份黄金样本的看法一致」：容器校验、钉扎、内容摘要。
         run: >
@@ -136,8 +144,8 @@ jobs:
           -File tests\e2e\msixpkg-negative.ps1
           -ExePath build\ci-native\Debug\msixpkg-native.exe
 
-  nsis-package:
-    name: nsis distribution package
+  setup-package:
+    name: setup distribution package
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -159,29 +167,29 @@ jobs:
       - name: build payload (Release)
         run: cmake --build build/ci-native --config Release --parallel
 
-      - name: build the setup exe
-        # 脚本按需下载官方 NSIS 3.10 两个包（校验 SHA-256）并叠加成 strlen_8192 工具链；
-        # 载荷目录与本地 preset 不同，所以用 -PayloadDir 指过去。
+      - name: pack the setup exe
+        # 自研 setup：CMake 产物 + 自附加载荷（不下载 NSIS，也不需要外部工具链）。
         run: >
           powershell -NoProfile -ExecutionPolicy Bypass
-          -File scripts\build-nsis-installer.ps1
+          -File scripts\build-setup.ps1
           -PayloadDir build\ci-native\Release
           -OutputDir artifacts\setup
 
       - name: install / uninstall E2E
         # 这一段是「真实机器」的验证：托管运行器允许子进程写 HKCU，所以安装记录、
         # ARP 条目、.msixpkg 关联与 PATH 的写入/清理断言都会真的执行
-        #（本机受限环境里这一段会打印 SKIP，见 installer/nsis/README.md §6）。
+        #（本机受限环境里这一段会打印 SKIP，见 installer/setup/README.md）。
         run: >
           powershell -NoProfile -ExecutionPolicy Bypass
-          -File tests\e2e\nsis-installer-e2e.ps1
+          -File tests\e2e\setup-installer-e2e.ps1
           -PayloadDir build\ci-native\Release
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: nsis-setup
+          name: setup
           path: |
             artifacts/setup/*.exe
+            artifacts/setup/*.zip
             artifacts/setup/*.sha256
           if-no-files-found: warn

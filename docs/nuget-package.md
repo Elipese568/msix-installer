@@ -10,7 +10,7 @@
 | `Msixpkg.Build` | ✅ **是**（MIT） | `build\Msixpkg.Build.targets` + `tasks\netstandard2.0\Msixpkg.Tasks.dll` |
 | `Msixpkg.Core` | ❌ 否 | 作为**二进制附属**放进 `Msixpkg.Build` 包的 `tasks\netstandard2.0\Msixpkg.Core.dll` |
 | `Msixpkg.Packer`（`msixpkg` CLI） | ❌ 否 | 开发机 / CI 的构建期工具，`dotnet build` 从源码产出即可，不是给终端用户的产物 |
-| 原生安装器（`msixpkg-installer.exe` / `msixpkg-native.exe`） | ❌ 否 | 终端用户拿到的是 NSIS 安装包或便携 zip，见 [`installer/nsis/README.md`](../installer/nsis/README.md) |
+| 原生安装器（`msixpkg-installer.exe` / `msixpkg-native.exe`） | ❌ 否 | 终端用户拿到的是自研 setup 或便携 zip，见 [`installer/setup/README.md`](../installer/setup/README.md) |
 
 > 为什么 Core 不做成依赖：任务 DLL 是被宿主 MSBuild 进程在**自己的 load context** 里加载的，
 > 它的依赖必须与它同目录才能解析。若再声明一个 `Msixpkg.Core` 包依赖，就会出现同一程序集的
@@ -21,7 +21,7 @@
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Msixpkg.Build" Version="0.1.0" />
+  <PackageReference Include="Msixpkg.Build" Version="0.3.0" />
 </ItemGroup>
 
 <PropertyGroup>
@@ -74,7 +74,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
 # 期望：25 项检查全过
 ```
 
-**验收刻意只在本机跑**：CI（[`ci.yml`](../.github/workflows/ci.yml)）负责托管/原生/E2E/NSIS 四段验证，
+**验收刻意只在本机跑**：CI（[`ci.yml`](../.github/workflows/ci.yml)）负责托管/原生/E2E/setup 四段验证，
 NuGet 那条流水线（[`nuget-publish.yml`](../.github/workflows/nuget-publish.yml)）只负责「构建 + 发布」。
 需要复核包本身时，跑上面第二条命令即可。
 
@@ -87,11 +87,12 @@ NuGet 那条流水线（[`nuget-publish.yml`](../.github/workflows/nuget-publish
 
 ## 5. 版本与发布（CI 负责构建与发布）
 
-**已发布版本：`0.1.0`** — <https://www.nuget.org/packages/Msixpkg.Build/0.1.0>
-（由 tag `v0.1.0` 触发，[发布记录](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）。
+**已发布版本：`0.3.0`** — <https://www.nuget.org/packages/Msixpkg.Build/0.3.0>
+（由 tag `v0.3.0` 触发；上一版 `0.1.0` 的发布记录：
+[run 38944111342](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）。
 包 ID + 版本一旦发布不可覆盖，所以后续每次改动都要换版本号。
 
-版本号的事实来源是 `Directory.Build.props` 的 `0.1.0`；发布时由工作流覆盖
+版本号的事实来源是 `Directory.Build.props` 的 `0.3.0`；发布时由工作流覆盖
 （`scripts\pack-nuget.ps1 -Version <版本>`）。样例工程里钉的版本要同步改。
 
 发布走 [`.github/workflows/nuget-publish.yml`](../.github/workflows/nuget-publish.yml)：

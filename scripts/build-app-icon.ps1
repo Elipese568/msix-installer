@@ -4,9 +4,9 @@
 
 .DESCRIPTION
     为什么要有这个脚本：msixpkg.ico 同时被三处使用 —— 原生向导/CLI 的 PE 资源
-    （res/msixpkg.rc）、NSIS 安装包的安装器/卸载器图标（MUI_ICON/MUI_UNICON）、
-    以及 .msixpkg 文件关联的 DefaultIcon（从 msixpkg-installer.exe 取）。
-    母版 PNG 只有一个尺寸，直接让 rc.exe / NSIS 去缩放会在 16×16 下糊成一团，
+    （res/msixpkg.rc）、setup / Uninstall.exe 的安装器图标、以及 .msixpkg 文件关联的
+    DefaultIcon（从 msixpkg-installer.exe 取）。
+    母版 PNG 只有一个尺寸，直接让 rc.exe 去缩放会在 16×16 下糊成一团，
     所以这里一次性烘出 Windows 会实际用到的全部尺寸。
 
     尺寸选择：
@@ -16,7 +16,7 @@
 
     编码选择：
       * 16–128 写 32bpp DIB（BITMAPINFOHEADER + BGRA + AND mask）。这是资源管理器
-        与 NSIS 都能稳定读取的老格式；
+        能稳定读取的老格式；
       * 256 写 PNG（Vista+ 支持）。256 的 DIB 会白白多出 256 KB，而 PNG 更小。
 
     透明处理：
@@ -135,7 +135,7 @@ function Get-DibBytes {
     }
 
     # AND mask：每行按 32 位对齐；alpha == 0 的像素置 1（“透明”）。
-    # 32bpp 图标其实靠 alpha 通道，但老组件（包括部分 NSIS/Shell 路径）仍会读 mask。
+    # 32bpp 图标其实靠 alpha 通道，但老组件（部分 Shell 路径）仍会读 mask。
     $maskStride = [int]([Math]::Ceiling($size / 32.0) * 4)
     $mask = New-Object byte[] ($maskStride * $size)
     for ($y = 0; $y -lt $size; $y++) {

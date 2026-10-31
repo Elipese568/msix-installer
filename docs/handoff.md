@@ -18,7 +18,7 @@
 
 **M0–M7 全部完成**：托管侧（打包器 + MSBuild 任务 + 132 条测试）、
 原生侧（容器读 + 校验器 + 证书存储 + 部署封装 + 状态库 + 编排 + CLI + Win32 向导，
-**63 条原生测试**，Debug/Release 双配置零警告）、E2E 脚本与 CI 都已就位，
+**72 条原生测试**，Debug/Release 双配置零警告）、E2E 脚本与 CI 都已就位，
 构建期打包工具也已经作为 `Msixpkg.Build` NuGet 包产出并通过消费者视角验收。
 
 | 里程碑 | 内容 | 状态 |
@@ -31,7 +31,7 @@
 | M5 | 引用计数 + `list/verify/repair/clean` + ARP 卸载入口 | ✅ |
 | M6 | GUI 向导（**Wren 自绘**，`-DMSIXPKG_GUI_LEGACY=ON` 可回退老 Win32 控件版）+ `app.manifest` + `res/*.rc` | ✅ |
 | M7 | Windows Sandbox E2E + CI + 文档定稿 | ✅ |
-| 分发 | NSIS 安装包（`installer/nsis/`）：把向导 + CLI 装到用户机器，含快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口；另出便携 zip（`%TEMP%` 写不了的容器/沙箱用） | ✅ 46 项 E2E + PATH 逻辑 13 个 NSIS 用例；注册表效果断言需在普通机器/CI 上跑（受限环境子进程写不了 HKCU） |
+| 分发 | 自研原生 setup（`installer/setup/`）：把向导 + CLI + `Uninstall.exe` 装到用户机器，含快捷方式、`.msixpkg` 关联、PATH、ARP 卸载入口、自提权；另出便携 zip | ✅ 45 项 E2E + 90 项 GUI 烟测 + 72 条原生测试；注册表效果断言需在普通机器/CI 上跑（受限环境子进程写不了 HKCU） |
 | NuGet | `Msixpkg.Build` 任务包（构建期自动产出 `.msixpkg`；Core 作为二进制附属随包） | ✅ MIT；25 项包验收（包布局 + PackageReference 消费 + 两个 MSBuild 宿主下与黄金样本逐字节一致）；发布走 `nuget-publish.yml`（tag / 手动触发，OIDC） |
 
 **在本机能验证的范围内全部验证过**（详见 §5）；真实安装 / 卸载闭环在本机受限执行环境里
@@ -56,12 +56,12 @@
 `Windows.Management.Deployment` 的包仓库访问也被拒 |
 | 未签名的 exe | 本机装了 **360 安全套装**（`Get-MpComputerStatus` 显示 Defender 实时保护为关）。
 实测（同一段探针，父进程无论是 `pwsh` 还是计划任务，结果一致）：
-**任何未签名 exe**（NSIS 安装包、随手 `csc` 编的探针）在 `C:` 上**建不了临时文件**
+**任何未签名 exe**（随手 `csc` 编的探针、早期 NSIS 安装包）在 `C:` 上**建不了临时文件**
 （`GetTempFileName` → 错误 5 = ACCESS_DENIED），并且**写不了注册表**（HKCU/HKLM 都 Access denied）；
 签名的 Microsoft 程序（`pwsh`/`cmd`）不受影响，`D:` 上的临时文件也不受影响。
-后果：NSIS 安装包默认双击必然弹 `Error writing temporary file`（stub 是未签名 exe，`%TEMP%` 在 C:），
-把 `TEMP/TMP` 指到工作区就能装文件，但「安装记录 / ARP / 关联 / PATH」仍在日志里报 WARNING/FAILED。
-所以断言必须由被测程序自己产生效果（见 `tests/e2e/nsis-installer-e2e.ps1` 的 `registryEffective`），
+**自研 setup 不再依赖 `%TEMP%`**（载荷从自己的 exe 里读），所以这个环境的双击安装是能装文件的；
+但「安装记录 / ARP / 关联 / PATH」仍是 Access denied，会在日志里报 WARNING/FAILED。
+断言必须由被测程序自己产生效果（见 `tests/e2e/setup-installer-e2e.ps1` 的 `registryEffective`），
 别用「shell 能写」代替；要跑全注册表断言得给安装包加安全软件排除项或签受信任的证书。 |
 
 **环境的三个硬限制（都踩过）**：
@@ -86,11 +86,11 @@ dotnet build MsixpkgInstaller.slnx
 dotnet build tests\Msixpkg.Core.Tests
 tests\Msixpkg.Core.Tests\bin\Debug\net10.0\Msixpkg.Core.Tests.exe      # 期望：总计 132 成功 132
 
-# 原生：构建 + 测试（63 条）。必须在原生工程目录里跑，CMakePresets 在那里
+# 原生：构建 + 测试（72 条）。必须在原生工程目录里跑，CMakePresets 在那里
 cd src\MsixpkgInstaller.Native
 cmake --preset windows-x64 -S .
 cmake --build --preset windows-x64-debug
-build\x64\Debug\msixpkg_native_tests.exe                              # 期望：总计 63 成功 63
+build\x64\Debug\msixpkg_native_tests.exe                              # 期望：总计 72 成功 72
 cmake --build --preset windows-x64-release                            # /WX 已开，必须零警告
 build\x64\Release\msixpkg_native_tests.exe
 
@@ -133,14 +133,16 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nuget-package-e2e.ps1
 # 期望：25 项检查全过（两个 MSBuild 宿主都产出 EA972886…A986；找不到 VS 时第二个宿主会跳过）
 
 # 发布 Msixpkg.Build 到 nuget.org：由 CI 做（OIDC，无需长期密钥）
-git tag v0.2.1; git push origin v0.2.1     # 或在 Actions 里手动 Run workflow（可 dry_run=true）
+git tag v0.3.0; git push origin v0.3.0     # 或在 Actions 里手动 Run workflow（可 dry_run=true）
 # 需要先在 nuget.org 建信任策略 + 仓库加 Secret NUGET_USER（已配好），见 docs/nuget-package.md §5
 
-# 分发安装包（NSIS）：构建 + 安装/卸载验收（都不需要管理员）
-powershell -ExecutionPolicy Bypass -File scripts\build-nsis-installer.ps1
-# 期望：产物 artifacts\setup\MsixpkgInstaller-0.2.1-setup.exe + .sha256（/WX 零告警）
-powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
-# 期望：checks 46, failures 0, skipped 2（本机受限环境跳过注册表断言，脚本会打印原因）
+# 分发安装包（自研 setup）：构建 + 安装/卸载验收（都不需要管理员）
+powershell -ExecutionPolicy Bypass -File scripts\build-setup.ps1
+# 期望：产物 artifacts\setup\MsixpkgInstaller-0.3.0-setup.exe + .sha256 + portable.zip（/WX 零告警）
+powershell -ExecutionPolicy Bypass -File tests\e2e\setup-installer-e2e.ps1
+# 期望：checks 45, failures 0, skipped 2（本机受限环境跳过注册表断言，脚本会打印原因）
+powershell -ExecutionPolicy Bypass -File tests\e2e\setup-gui-smoke.ps1
+# 期望：checks 90, failures 0
 ```
 
 真实安装 / 卸载闭环见 [`../tests/e2e/README.md`](../tests/e2e/README.md)（需要提权 + 真实签名包）。
@@ -222,13 +224,16 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
    仓库里不存长期密钥。`v0.1.0` 已于 2026-10-17 发布：
    <https://www.nuget.org/packages/Msixpkg.Build/0.1.0>（发布记录
    [run 38944111342](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）。
-   下一次发布只需 `git tag v0.2.1 && git push origin v0.2.1`（记得同步改
-   `samples\MsixpkgPackageSample` 里钉的版本）。
+   `v0.3.0` 于 2026-10-31 发布：<https://www.nuget.org/packages/Msixpkg.Build/0.3.0>
+   （同一次 tag 也挂了 GitHub Release 的 setup.exe / portable.zip / dist.zip）。
+   下一次发布只需 `git tag v<新版本> && git push origin v<新版本>`（记得同步改
+   `Directory.Build.props` 的 `Version`、`res/msixpkg.rc` 的 `FILEVERSION`、
+   `src/installer.h` 的 `kInstallerVersion`，以及 `samples\MsixpkgPackageSample` 里钉的版本）。
    **包的验收（那 25 项）刻意只留在本机脚本里，不占 CI。**
 4. ~~`.msixpkg` 文件关联（`HKLM\Software\Classes`）与「双击安装」体验。~~
    **已完成**：`.msixpkg` 关联（ProgID `Msixpkg.Package` → `msixpkg-installer.exe "%1"`，
-   双击停在摘要页，绝不自动安装）由分发安装包 `installer/nsis/` 负责，
-   连同快捷方式、PATH 与「设置 → 应用」条目，见 [`installer/nsis/README.md`](../installer/nsis/README.md)。
+   双击停在摘要页，绝不自动安装）由分发安装包 `installer/setup/` 负责，
+   连同快捷方式、PATH 与「设置 → 应用」条目，见 [`installer/setup/README.md`](../installer/setup/README.md)。
 5. `--all-users` 的完整验证（需要管理员 + 系统卷；`ProvisionPackageForAllUsersAsync` 已实现）。
 6. `ExpectedDigests`（Windows 11 23504+ / UniversalApiContract v15）作为 TOCTOU 的第二道保险；
    目前用「部署前重算 SHA-256 + 暂存目录收紧 ACL」等价覆盖。
@@ -246,11 +251,11 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | 项 | 状态 |
 |---|---|
 | 托管 132 条测试 | ✅ 全绿 |
-| 原生 63 条测试（Debug / Release，`/WX`） | ✅ 全绿、零警告 |
+| 原生 72 条测试（Debug / Release，`/WX`） | ✅ 全绿、零警告 |
 | 原生 CLI 对黄金样本的校验（跨语言门禁） | ✅ `--pin --require-pin --dry-run` exit 0 |
 | 负例 E2E（`tests/e2e/msixpkg-negative.ps1`） | ✅ 33 项检查全过（含「dry-run 连目录都不建」） |
 | `Msixpkg.Build` NuGet 包：包布局 / 元数据 / PackageReference 消费 / 两个 MSBuild 宿主下与黄金样本**逐字节相同** / 全部条目 store | ✅ `tests/e2e/nuget-package-e2e.ps1`：checks 25, failures 0 |
-| 包发布到 nuget.org | ✅ **`Msixpkg.Build 0.1.0` 已发布**（<https://www.nuget.org/packages/Msixpkg.Build/0.1.0>）：tag `v0.1.0` → `nuget-publish.yml` → OIDC 临时 key → `dotnet nuget push` 全部成功（[run 38944111342](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）；发布前的本机验收 25/25 |
+| 包发布到 nuget.org | ✅ **`Msixpkg.Build 0.3.0` 已发布**（<https://www.nuget.org/packages/Msixpkg.Build/0.3.0>）；首发 `0.1.0`：tag `v0.1.0` → `nuget-publish.yml` → OIDC 临时 key → `dotnet nuget push` 全部成功（[run 38944111342](https://github.com/Elipese568/msix-installer/actions/runs/38944111342)）；发布前的本机验收 25/25 |
 | GUI（Wren）：五页渲染 | ✅ `--ui-page` + PrintWindow 截图：SUMMARY / CONSENT / PROGRESS / RESULT / MANAGE；空态、载入成功、深色/浅色/高对比度（`--ui-theme`）都看过 |
 | GUI（Wren）：同意页的安全门 | ✅ 用真实 MSAA 驱动：未勾「我了解并同意」→ 安装按钮禁用、信任框禁用；勾同意 → 信任框可用但安装仍禁用（未钉扎）；再勾「信任此发布者」→ 安装才可用 |
 | GUI（Wren）：同意页流程与复制 | ✅ 一次「下一步」直接进入安装（`preapproved_consent` 生效）；详情 `TextView` 可 Tab 聚焦、Ctrl+A/C；未钉扎警告在复选框上方回流 |
@@ -264,8 +269,9 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | 真实 MSIX 安装 / 卸载闭环 | ⚠️ **未在本机跑**（包仓库访问被拒；脚本已写好，需提权环境） |
 | ARP 条目真实写入 | ⚠️ **未在本机跑**（HKLM / HKCU 注册表写都被拒） |
 | 钉扎白名单（注册表）+ TOFU 记忆 | ⚠️ 注册表侧未在本机跑（写不了 HKLM）；**记忆与合并逻辑有单测**（`policy_tests.cpp`） |
-| NSIS 分发安装包：静默安装 / `/D=` / 载荷逐字节一致 / 日志 / 重复安装 / 组件开关 / `/ALLUSERS` 未提权退 5 / 不可创建目标退 4 / 两种卸载路径 / 安装记录不被删 / PATH 逻辑 13 个用例 | ✅ `tests/e2e/nsis-installer-e2e.ps1`：checks 46, failures 0（其中 7 项是 PATH 单测、4 项是便携包、3 项是免提权启动器） |
-| NSIS 分发安装包：安装记录 / ARP / `.msixpkg` 关联 / PATH 的**写入与清理** | ⚠️ 本机跑不了（受限环境不允许**子进程**写 HKCU）；套件会打印 SKIP 并改为断言「安装器如实上报了这些失败」，真实断言由 CI 的 `nsis-package` 作业在普通机器上跑 |
+| setup 分发安装包：静默安装 / `/D=` / 载荷逐字节一致 / 日志 / 重复安装 / 组件开关 / `/ALLUSERS` 未提权退 5 / 不可创建目标退 4 / 两种卸载路径 / 安装记录不被删 / 无 `%TEMP%` 安装 / GUI 自动安装卸载 | ✅ `tests/e2e/setup-installer-e2e.ps1`：checks 45, failures 0（本机；注册表断言 SKIP） |
+| setup 分发安装包：安装记录 / ARP / `.msixpkg` 关联 / PATH 的**写入与清理** | ⚠️ 本机跑不了（受限环境不允许**子进程**写 HKCU）；套件会打印 SKIP 并改为断言「安装器如实上报了这些失败」，真实断言由 CI 的 `setup-package` 作业在普通机器上跑 |
+| setup / Uninstall.exe 页面与无障碍 | ✅ `tests/e2e/setup-gui-smoke.ps1`：90 项（页面、控件 ID、状态、主题、帧统计、底部按钮真实鼠标点击） |
 
 > 这不是「没测」而是「本机测不了」：受限执行环境拒绝了注册表写与包仓库访问。
 > 代码里对这两种拒绝都有明确的上报路径（`guard_winrt` → 稳定错误码 + 可操作提示），
@@ -296,7 +302,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 | 15 | **`ZipArchive` + `CompressionLevel.NoCompression` 在两个宿主上语义不同** | .NET (Core) 写 `method 0`（store），**.NET Framework 写 `method 8`**（deflate 里包 stored block，每条目 +5 字节）。于是同一个工程 `dotnet build` 与 VS 构建出的 `.msixpkg` 字节不同 —— 而规范要求写出端必须 store。容器写出必须走 `Zip.StoredZipWriter`，别退回 `ZipArchive` |
 | 16 | 新增带中文的 `.ps1` 没有 UTF-8 **BOM** | Windows PowerShell 5.1 对无 BOM 文件按 ANSI（GBK）解析，中文注释会被拆成半个字符，直接**语法错误**。新建脚本后确认前三字节是 `EF BB BF`（`write`/`edit` 工具不会保留 BOM，改动后要重新补） |
 | 17 | CI 里写死 CMake 生成器 `-G "Visual Studio 17 2022"` | 托管运行器会换镜像：`windows-latest` 自 2026-06 起是 Windows Server 2025 + **VS 2026**，写死的名字直接 `could not find any instance of Visual Studio`。用 `scripts\detect-vs-generator.ps1`（vswhere 探测主版本 → 生成器名，写进 `$GITHUB_ENV`），三个原生作业共用 |
-| 18 | makensis 解析 `File` / `OutFile` 相对的是**脚本所在目录**，不是当前工作目录 | `scripts\build-nsis-installer.ps1` 的 `-PayloadDir` / `-OutputDir` 传相对路径 → `File: "build\ci-native\Release\msixpkg-installer.exe" -> no files found.`，`OutFile` 也会写错地方。本机默认路径恰好是绝对的，所以只在 CI 暴露；脚本现在先把路径入参绝对化 |
+| 18 | 自附加载荷与签名的顺序 | Authenticode 覆盖整个文件：**先 pack 再 sign**。反过来会让签名在追加载荷的瞬间失效；`build-setup.ps1` 把签名放在打包之后 |
 | 19 | **GUI 的提权助手用了 `current_executable_path()`** | GUI（`msixpkg-installer.exe`）会把自己以 `runas` 拉起当 `cert-add` 助手，而它不认识这个子命令 → 走进单实例交接 → 与等提权返回的父进程**三方互等死锁**：GUI 永久「未响应」，日志停在 `elevating: …`，证书永远导不进去（`LocalMachine\TrustedPeople` 里始终没有那张证书）。助手必须是**同目录的 CLI**：`helper_executable_path()`；只有 `msixpkg-native.exe` 自己运行时才用自己。另外那行日志以前硬编码打印 `msixpkg-native`，会把这类错误盖住 —— 现在打印真实路径 |
 | 20 | **在 `WM_COPYDATA` / 拖放处理里等编排线程** | 发送方是同步 `SendMessage`，它等我们返回；我们等编排线程；编排线程可能正等那个发送方退出。规则：**消息处理里绝不阻塞 UI 线程** —— 忙碌时回 `kCopyDataBusy`（这个常量以前定义了却从没被回过），发送端用 `SendMessageTimeoutW(SMTO_ABORTIFHUNG\|SMTO_BLOCK, 10s)` 并检查返回码 |
 | 21 | **`peek_data_roots()` 与 `resolve_data_roots()` 选的根可能不同** | 预演按「目录已存在」挑根、安装按「可写」挑根。在「`%ProgramData%\Msixpkg` 存在但普通用户不可写」的机器上，TOFU 记录写进 `%LOCALAPPDATA%\Msixpkg\publishers.json` 却从 `%ProgramData%` 读 → 「信任此发布者（将记住）」**永远不生效**，每次安装都要求重勾（日志里始终是 `pinning: NOT pinned`）。读「记住的发布者」要合并所有已存在的根（`publisher_policy_roots()`）；`MSIXPKG_DATA_ROOT` 覆盖时只认那一个根 |
@@ -312,22 +318,32 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\nsis-installer-e2e.ps1
 - `AddPackageByUriAsync` 会返回 **S_OK 但操作指针为 null**，对空对象调 `.Progress(...)`
   直接访问违例（`0xC0000005`，`/EHsc` 下 `catch(...)` 也接不住）。用 `require_operation()` 先验有效。
 
-### 6.3 分发安装包（NSIS）期间新踩的
+### 6.3 分发安装包（自研 setup）期间新踩的
 
-完整表（11 条，含复现手法）见 [`installer/nsis/README.md`](../installer/nsis/README.md) §5。
-最容易再犯的四条：
+完整设计见 [`installer/setup/README.md`](../installer/setup/README.md)。最容易再犯的几条：
 
-- **`FileOpen $9 "x.log" a` 不会定位到末尾**（实测第二次写从 offset 0 覆盖）：必须
-  `FileSeek $9 0 END`，否则日志只剩最后一次运行的最后一行。
-- **NSIS 启动时就消费掉 `/D=` 并从 `$CMDLINE` 里删掉它**：判断「用户是否显式给了目录」
-  只能靠 `$INSTDIR` 是否仍等于 `InstallDir` 默认值。漏了这步，`.onInit` 会用默认目录覆盖
-  `/D=`，静默安装装到别处**还退 0**。
-- **`SetOutPath`/`File` 失败不会让安装失败**：复制后必须自己 `IfFileExists` 复查，
-  否则「什么都没装」也报成功。
-- **官方 NSIS 默认 `NSIS_MAX_STRLEN=1024`**：读长 PATH 会静默截断，写回去就是破坏用户的
-  PATH；必须用官方 `strlen_8192` 覆盖包，并在运行时按注册表报告的真实字节数再挡一次。
+- **注册表 API 直接返回 `LSTATUS`，不设置 `GetLastError`**：一开始用 `GetLastError()` 格式化
+  `RegCreateKeyExW` 失败，结果把上一条无关调用的 183/6 当成了真实原因（实际是 Access denied=5）。
+  所有 `Reg*` 错误都必须用返回值。
+- **诊断页不能触发真实动作**：`--ui-page finish --ui-result success` 曾让完成页的
+  「运行安装器」复选框生效，`ShellExecute` 拉起一个向导把测试卡住。诊断/自动模式必须显式
+  标记 `diagnostics_`，并跳过「运行安装器 / 自删除」这类副作用。
+- **UIA 的 InvokePattern 对 Wren 自绘控件是 no-op**：`winapp ui invoke btn-0011` 会返回成功，
+  但按钮的 `on_click` 不会跑（没有子 HWND）。GUI 集成测试用 `/AUTO` 让页面自己执行主动作，
+  不要假装点击成功。
+- **自删除不能同步做**：正在运行的 exe 删不掉自己。卸载器先把自己改名成
+  `~uninstall-<pid>.tmp`，再起一个 detached `cmd`（`ping` 一秒后 `del` + `rmdir`），
+  进程退出后由它收尾。
+- **日志目录要有覆盖入口**：受限环境里 `%LOCALAPPDATA%` 写不了、`%TEMP%` 也可能不可用；
+  `--log-dir` / `MSIXPKG_SETUP_LOG_DIR` 让 E2E 把日志固定在 workspace 里。
 
 ### 6.4 Wren 迁移期间新踩的
+
+- **页面 Panel 铺满客户区会吃掉底部按钮的点击**：`Panel::hit_test` 先问子节点、再问自己的
+  `bounds`，而页面是后添加的（在 z 序上层）。setup 第一版把每页设成 760×560，结果底部
+  「安装/取消/上一步」看得到、点不到（键盘 Enter 仍然能用，所以烟测没发现）。页面的
+  `bounds` 必须止于 footer 上方（setup 用 0..496，footer 从 502 开始），
+  `setup-gui-smoke.ps1` 现在会真的发 `WM_LBUTTONDOWN/UP` 点「取消」来钉住这条。
 
 - **硬件 Canvas 没有文字度量后端**：`Host::render` 只给 GDI 帧的 Canvas 设了
   `text_metrics`，D2D 硬件 Canvas 的 `measure_text_width` 于是退回 GDI+，而它没有
